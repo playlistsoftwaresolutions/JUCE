@@ -616,11 +616,21 @@ private:
                 videoDataOutputDelegate.reset ([cls.createInstance() init]);
                 VideoDataOutputSampleBufferDelegateClass::setOwner (videoDataOutputDelegate.get(), this);
                 
+                JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
+                [[NSNotificationCenter defaultCenter] addObserver: videoDataOutputDelegate.get()
+                                                         selector: @selector (deviceOrientationDidChange:)
+                                                             name: UIDeviceOrientationDidChangeNotification
+                                                           object: UIDevice.currentDevice];
+                JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+
                 // Specify the pixel format
                 captureOutput.videoSettings =
                             [NSDictionary dictionaryWithObject:
                                 [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]
                                 forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+                if (auto c = captureOutput.connections.firstObject) {
+                    c.videoOrientation = (AVCaptureVideoOrientation)UIDevice.currentDevice.orientation;
+                }
 
                 [captureOutput setSampleBufferDelegate:videoDataOutputDelegate.get() queue:videoDataOutputDelegateQueue];
                 
@@ -634,12 +644,22 @@ private:
             
             std::function<void (const Image&)> videoDataOutputCallback;
 
+            void deviceOrientationDidChange()
+            {
+                if (auto c = captureOutput.connections.firstObject) {
+                    c.videoOrientation = (AVCaptureVideoOrientation)UIDevice.currentDevice.orientation;
+                }
+            }
+            
         private:
             struct VideoDataOutputSampleBufferDelegateClass    : public ObjCClass<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>>
             {
                 VideoDataOutputSampleBufferDelegateClass()  : ObjCClass<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>> ("VideoDataOutputSampleBufferDelegateClass_")
                 {
                     addMethod (@selector (captureOutput:didOutputSampleBuffer:fromConnection:),        didOutputSampleBuffer, "v@:@@@");
+                    JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
+                    addMethod (@selector (deviceOrientationDidChange:), deviceOrientationDidChange, "v@:@");
+                    JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
                     addIvar<VideoDataOutputDelegate*> ("owner");
 
@@ -649,6 +669,16 @@ private:
                 //==============================================================================
                 static VideoDataOutputDelegate& getOwner (id self) { return *getIvar<VideoDataOutputDelegate*> (self, "owner"); }
                 static void setOwner (id self, VideoDataOutputDelegate* t) { object_setInstanceVariable (self, "owner", t); }
+                
+                static void deviceOrientationDidChange (id self, SEL, NSNotification* notification)
+                {
+                    JUCE_CAMERA_LOG (nsStringToJuce ([notification description]));
+
+                    dispatch_async (dispatch_get_main_queue(),
+                                    ^{
+                                        getOwner (self).deviceOrientationDidChange ();
+                                    });
+                }
 
             private:
                 // Delegate routine that is called when a sample buffer was written
@@ -1263,6 +1293,13 @@ private:
         void cameraSessionRuntimeError (const String& error)
         {
             owner.cameraSessionRuntimeError (error);
+        }
+        
+        void deviceOrientationDidChange()
+        {
+            if (videoDataOutputDelegate) {
+                videoDataOutputDelegate->deviceOrientationDidChange();
+            }
         }
 
         void callListeners (const Image& image)
