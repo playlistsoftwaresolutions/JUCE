@@ -158,6 +158,11 @@ void CameraDevice::takeStillPicture (std::function<void (const Image&)> pictureT
     pimpl->takeStillPicture (pictureTakenCallback);
 }
 
+void CameraDevice::startVideoDataCapture(std::function<void (const Image&)> videoDataOutputCallback)
+{
+    pimpl->startVideoDataCapture(videoDataOutputCallback);
+}
+
 void CameraDevice::startRecordingToFile (const File& file, int quality)
 {
     stopRecording();
