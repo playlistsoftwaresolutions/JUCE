@@ -92,11 +92,6 @@ struct CameraDevice::Pimpl
         triggerStillPictureCapture();
     }
     
-    void startVideoDataCapture(std::function<void (const Image&)> videoDataOutputCallbackToUse)
-    {
-        captureSession.startVideoDataCapture(videoDataOutputCallbackToUse);
-    }
-
     void startRecordingToFile (const File& file, int /*quality*/)
     {
         file.deleteFile();
@@ -137,14 +132,16 @@ struct CameraDevice::Pimpl
         const ScopedLock sl (listenerLock);
         listeners.add (listenerToAdd);
 
-        if (listeners.size() == 1)
-            triggerStillPictureCapture();
+        captureSession.startVideoDataCapture();
     }
 
     void removeListener (CameraDevice::Listener* listenerToRemove)
     {
         const ScopedLock sl (listenerLock);
         listeners.remove (listenerToRemove);
+        
+        if (listeners.size() == 0)
+            captureSession.stopVideoDataCapture();
     }
 
 private:
@@ -504,10 +501,20 @@ private:
             return videoRecorder.getTimeOfFirstRecordedFrame();
         }
         
-        void startVideoDataCapture(std::function<void (const Image&)> videoDataOutputCallbackToUse)
+        void startVideoDataCapture()
         {
-            videoRecorder.enableRecording(false);
-            videoDataOutputDelegate.reset(new VideoDataOutputDelegate(*this, videoDataOutputCallbackToUse));
+            dispatch_async (captureSessionQueue,^ {
+                videoRecorder.enableRecording(false);
+                videoDataOutputDelegate.reset(new VideoDataOutputDelegate(*this));
+            });
+        }
+        
+        void stopVideoDataCapture()
+        {
+            dispatch_async (captureSessionQueue,^ {
+                videoRecorder.enableRecording(true);
+                videoDataOutputDelegate.reset();
+            });
         }
 
         JUCE_DECLARE_WEAK_REFERENCEABLE (CaptureSession)
@@ -600,14 +607,12 @@ private:
             }
         };
 
-
         //==============================================================================
         class VideoDataOutputDelegate
         {
         public:
-            VideoDataOutputDelegate (CaptureSession& cs, std::function<void (const Image&)> callback)
-                : videoDataOutputCallback(callback),
-                  captureSession (cs),
+            VideoDataOutputDelegate (CaptureSession& cs)
+                : captureSession (cs),
                   videoDataOutputDelegateQueue(dispatch_queue_create("videoDataOutputDelegateQueue", NULL)),
                   captureOutput ([[[AVCaptureVideoDataOutput alloc] init] autorelease]),
                   videoDataOutputDelegate (nullptr)
@@ -623,11 +628,11 @@ private:
                                                            object: UIDevice.currentDevice];
                 JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
-                // Specify the pixel format
                 captureOutput.videoSettings =
                             [NSDictionary dictionaryWithObject:
                                 [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]
                                 forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+                
                 captureOutput.alwaysDiscardsLateVideoFrames = true;
                 
                 [captureOutput setSampleBufferDelegate:videoDataOutputDelegate.get() queue:videoDataOutputDelegateQueue];
@@ -646,13 +651,16 @@ private:
                 dispatch_release(videoDataOutputDelegateQueue);
             }
             
-            std::function<void (const Image&)> videoDataOutputCallback;
-
             void deviceOrientationDidChange()
             {
                 if (auto c = captureOutput.connections.firstObject) {
                     c.videoOrientation = (AVCaptureVideoOrientation)UIDevice.currentDevice.orientation;
                 }
+            }
+            
+            void didOutputImage(const Image& image)
+            {
+                captureSession.callListeners(image);
             }
             
         private:
@@ -697,9 +705,8 @@ private:
                         return;
                                         
                     auto pixelFormatType = CVPixelBufferGetPixelFormatType(imageBuffer);
-                    auto isPlanar = CVPixelBufferIsPlanar(imageBuffer);
                     
-                    if (pixelFormatType == kCVPixelFormatType_32BGRA && isPlanar == false)
+                    if (pixelFormatType == kCVPixelFormatType_32BGRA)
                     {
                         auto baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
                         auto bytesPerRow = (int)CVPixelBufferGetBytesPerRow(imageBuffer);
@@ -714,7 +721,7 @@ private:
                         
                         memcpy(bitmapData.data, baseAddress, dataSize);
                         
-                        getOwner(self).videoDataOutputCallback(image);
+                        getOwner(self).didOutputImage(image);
 
                         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
                     }
@@ -728,7 +735,6 @@ private:
             AVCaptureVideoDataOutput* captureOutput;
             
             std::unique_ptr<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>, NSObjectDeleter> videoDataOutputDelegate;
-            
         };
 
         //==============================================================================
