@@ -628,13 +628,15 @@ private:
                             [NSDictionary dictionaryWithObject:
                                 [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]
                                 forKey:(id)kCVPixelBufferPixelFormatTypeKey];
-                if (auto c = captureOutput.connections.firstObject) {
-                    c.videoOrientation = (AVCaptureVideoOrientation)UIDevice.currentDevice.orientation;
-                }
-
                 [captureOutput setSampleBufferDelegate:videoDataOutputDelegate.get() queue:videoDataOutputDelegateQueue];
                 
                 captureSession.addOutputIfPossible (captureOutput);
+                
+                dispatch_async (dispatch_get_main_queue(),
+                                ^{
+                                    deviceOrientationDidChange ();
+                                });
+
             }
             
             ~VideoDataOutputDelegate()
