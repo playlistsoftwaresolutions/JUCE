@@ -605,7 +605,7 @@ private:
         class VideoDataOutputDelegate
         {
         public:
-            VideoDataOutputDelegate (CaptureSession& cs, std::function<void (const Image& image)> callback)
+            VideoDataOutputDelegate (CaptureSession& cs, std::function<void (const Image&)> callback)
                 : videoDataOutputCallback(callback),
                   captureSession (cs),
                   videoDataOutputDelegateQueue(dispatch_queue_create("videoDataOutputDelegateQueue", NULL)),
@@ -628,6 +628,8 @@ private:
                             [NSDictionary dictionaryWithObject:
                                 [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]
                                 forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+                captureOutput.alwaysDiscardsLateVideoFrames = true;
+                
                 [captureOutput setSampleBufferDelegate:videoDataOutputDelegate.get() queue:videoDataOutputDelegateQueue];
                 
                 captureSession.addOutputIfPossible (captureOutput);
@@ -690,23 +692,32 @@ private:
                                                    AVCaptureConnection* connection)
                 {
                     CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-                    CVPixelBufferLockBaseAddress(imageBuffer, 0);
                     
-                    Image image (Image::ARGB,
-                                 CVPixelBufferGetWidth(imageBuffer),
-                                 CVPixelBufferGetHeight(imageBuffer),
-                                 false);
+                    if (CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+                        return;
+                                        
+                    auto pixelFormatType = CVPixelBufferGetPixelFormatType(imageBuffer);
+                    auto isPlanar = CVPixelBufferIsPlanar(imageBuffer);
+                    
+                    if (pixelFormatType == kCVPixelFormatType_32BGRA && isPlanar == false)
+                    {
+                        auto baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
+                        auto bytesPerRow = (int)CVPixelBufferGetBytesPerRow(imageBuffer);
+                        //auto imageWidth = (int)CVPixelBufferGetWidth(imageBuffer);
+                        int imageWidth = bytesPerRow / 4;
+                        auto imageHeight = (int)CVPixelBufferGetHeight(imageBuffer);
+                        //auto dataSize = CVPixelBufferGetDataSize(imageBuffer);
+                        int dataSize = imageHeight * bytesPerRow;
+                        
+                        Image image (Image::ARGB, imageWidth, imageHeight, false);
+                        Image::BitmapData bitmapData(image, Image::BitmapData::writeOnly);
+                        
+                        memcpy(bitmapData.data, baseAddress, dataSize);
+                        
+                        getOwner(self).videoDataOutputCallback(image);
 
-                    
-                    Image::BitmapData bitmapData(image, Image::BitmapData::writeOnly);
-                    
-                    
-                    auto baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
-                    auto dataSize = CVPixelBufferGetDataSize(imageBuffer);
-                    memcpy(bitmapData.data, baseAddress, dataSize);
-                    CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
-                    
-                    getOwner(self).videoDataOutputCallback(image);
+                        CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                    }
                 }
             };
             
