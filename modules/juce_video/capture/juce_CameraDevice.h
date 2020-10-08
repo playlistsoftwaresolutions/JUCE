@@ -128,8 +128,6 @@ public:
      */
     void takeStillPicture (std::function<void (const Image&)> pictureTakenCallback);
 
-    void startVideoDataCapture(std::function<void (const Image&)> videoDataOutputCallback);
-    
     /** Starts recording video to the specified file.
 
         You should use getFileExtension() to find out the correct extension to
