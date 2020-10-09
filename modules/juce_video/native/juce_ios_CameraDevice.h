@@ -132,7 +132,8 @@ struct CameraDevice::Pimpl
         const ScopedLock sl (listenerLock);
         listeners.add (listenerToAdd);
 
-        captureSession.startVideoDataCapture();
+        if (listeners.size() == 1)
+            captureSession.startVideoDataCapture();
     }
 
     void removeListener (CameraDevice::Listener* listenerToRemove)
