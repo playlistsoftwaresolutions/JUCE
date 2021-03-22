@@ -91,7 +91,7 @@ struct CameraDevice::Pimpl
 
         triggerStillPictureCapture();
     }
-
+    
     void startRecordingToFile (const File& file, int /*quality*/)
     {
         file.deleteFile();
@@ -133,13 +133,16 @@ struct CameraDevice::Pimpl
         listeners.add (listenerToAdd);
 
         if (listeners.size() == 1)
-            triggerStillPictureCapture();
+            captureSession.startVideoDataCapture();
     }
 
     void removeListener (CameraDevice::Listener* listenerToRemove)
     {
         const ScopedLock sl (listenerLock);
         listeners.remove (listenerToRemove);
+        
+        if (listeners.size() == 0)
+            captureSession.stopVideoDataCapture();
     }
 
 private:
@@ -498,6 +501,22 @@ private:
         {
             return videoRecorder.getTimeOfFirstRecordedFrame();
         }
+        
+        void startVideoDataCapture()
+        {
+            dispatch_async (captureSessionQueue,^ {
+                videoRecorder.enableRecording(false);
+                videoDataOutputDelegate.reset(new VideoDataOutputDelegate(*this));
+            });
+        }
+        
+        void stopVideoDataCapture()
+        {
+            dispatch_async (captureSessionQueue,^ {
+                videoRecorder.enableRecording(true);
+                videoDataOutputDelegate.reset();
+            });
+        }
 
         JUCE_DECLARE_WEAK_REFERENCEABLE (CaptureSession)
 
@@ -587,6 +606,136 @@ private:
 
                 ignoreUnused (notification);
             }
+        };
+
+        //==============================================================================
+        class VideoDataOutputDelegate
+        {
+        public:
+            VideoDataOutputDelegate (CaptureSession& cs)
+                : captureSession (cs),
+                  videoDataOutputDelegateQueue(dispatch_queue_create("videoDataOutputDelegateQueue", NULL)),
+                  captureOutput ([[[AVCaptureVideoDataOutput alloc] init] autorelease]),
+                  videoDataOutputDelegate (nullptr)
+            {
+                static VideoDataOutputSampleBufferDelegateClass cls;
+                videoDataOutputDelegate.reset ([cls.createInstance() init]);
+                VideoDataOutputSampleBufferDelegateClass::setOwner (videoDataOutputDelegate.get(), this);
+                
+                JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
+                [[NSNotificationCenter defaultCenter] addObserver: videoDataOutputDelegate.get()
+                                                         selector: @selector (deviceOrientationDidChange:)
+                                                             name: UIDeviceOrientationDidChangeNotification
+                                                           object: UIDevice.currentDevice];
+                JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+
+                captureOutput.videoSettings =
+                            [NSDictionary dictionaryWithObject:
+                                [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]
+                                forKey:(id)kCVPixelBufferPixelFormatTypeKey];
+                
+                captureOutput.alwaysDiscardsLateVideoFrames = true;
+                
+                [captureOutput setSampleBufferDelegate:videoDataOutputDelegate.get() queue:videoDataOutputDelegateQueue];
+                
+                captureSession.addOutputIfPossible (captureOutput);
+                
+                dispatch_async (dispatch_get_main_queue(),
+                                ^{
+                                    deviceOrientationDidChange ();
+                                });
+
+            }
+            
+            ~VideoDataOutputDelegate()
+            {
+                dispatch_release(videoDataOutputDelegateQueue);
+            }
+            
+            void deviceOrientationDidChange()
+            {
+                if (auto c = captureOutput.connections.firstObject) {
+                    c.videoOrientation = (AVCaptureVideoOrientation)UIDevice.currentDevice.orientation;
+                }
+            }
+            
+            void didOutputImage(const Image& image)
+            {
+                captureSession.callListeners(image);
+            }
+            
+        private:
+            struct VideoDataOutputSampleBufferDelegateClass    : public ObjCClass<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>>
+            {
+                VideoDataOutputSampleBufferDelegateClass()  : ObjCClass<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>> ("VideoDataOutputSampleBufferDelegateClass_")
+                {
+                    addMethod (@selector (captureOutput:didOutputSampleBuffer:fromConnection:),        didOutputSampleBuffer, "v@:@@@");
+                    JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wundeclared-selector")
+                    addMethod (@selector (deviceOrientationDidChange:), deviceOrientationDidChange, "v@:@");
+                    JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+
+                    addIvar<VideoDataOutputDelegate*> ("owner");
+
+                    registerClass();
+                }
+
+                //==============================================================================
+                static VideoDataOutputDelegate& getOwner (id self) { return *getIvar<VideoDataOutputDelegate*> (self, "owner"); }
+                static void setOwner (id self, VideoDataOutputDelegate* t) { object_setInstanceVariable (self, "owner", t); }
+                
+                static void deviceOrientationDidChange (id self, SEL, NSNotification* notification)
+                {
+                    JUCE_CAMERA_LOG (nsStringToJuce ([notification description]));
+
+                    dispatch_async (dispatch_get_main_queue(),
+                                    ^{
+                                        getOwner (self).deviceOrientationDidChange ();
+                                    });
+                }
+
+            private:
+                // Delegate routine that is called when a sample buffer was written
+                static void didOutputSampleBuffer (id self, SEL,
+                                                   AVCaptureOutput* output,
+                                                   CMSampleBufferRef sampleBuffer,
+                                                   AVCaptureConnection* connection)
+                {
+                    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+                    
+                    if (CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+                        return;
+                                        
+                    auto pixelFormatType = CVPixelBufferGetPixelFormatType(imageBuffer);
+                    
+                    if (pixelFormatType == kCVPixelFormatType_32BGRA)
+                    {
+                        auto baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
+                        auto bytesPerRow = (int)CVPixelBufferGetBytesPerRow(imageBuffer);
+                        //auto imageWidth = (int)CVPixelBufferGetWidth(imageBuffer);
+                        int imageWidth = bytesPerRow / 4;
+                        auto imageHeight = (int)CVPixelBufferGetHeight(imageBuffer);
+                        //auto dataSize = CVPixelBufferGetDataSize(imageBuffer);
+                        int dataSize = imageHeight * bytesPerRow;
+                        
+                        Image image (Image::ARGB, imageWidth, imageHeight, false);
+                        Image::BitmapData bitmapData(image, Image::BitmapData::writeOnly);
+                        
+                        memcpy(bitmapData.data, baseAddress, dataSize);
+                        
+                        getOwner(self).didOutputImage(image);
+
+                        CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+                    }
+                }
+            };
+            
+        private:
+            CaptureSession& captureSession;
+            dispatch_queue_t videoDataOutputDelegateQueue;
+            
+            AVCaptureVideoDataOutput* captureOutput;
+            
+            std::unique_ptr<NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>, NSObjectDeleter> videoDataOutputDelegate;
         };
 
         //==============================================================================
@@ -990,15 +1139,16 @@ private:
         class VideoRecorder
         {
         public:
-            VideoRecorder (CaptureSession& session)
-                : movieFileOutput ([AVCaptureMovieFileOutput new]),
+            VideoRecorder (CaptureSession& cs)
+                : session(cs), movieFileOutput ([AVCaptureMovieFileOutput new]),
                   delegate (nullptr)
             {
                 static FileOutputRecordingDelegateClass cls;
                 delegate.reset ([cls.createInstance() init]);
                 FileOutputRecordingDelegateClass::setOwner (delegate.get(), this);
 
-                session.addOutputIfPossible (movieFileOutput);
+                enableRecording(true);
+                // session.addOutputIfPossible (movieFileOutput);
             }
 
             ~VideoRecorder()
@@ -1010,8 +1160,24 @@ private:
                 jassert (! recordingInProgress);
             }
 
+            void enableRecording(bool canRecord)
+            {
+                if (canRecord) {
+                    session.addOutputIfPossible (movieFileOutput);
+                }
+                else {
+                    stopRecording();
+                    session.removeOutput(movieFileOutput);
+                }
+                
+                isEnabled = canRecord;
+            }
+            
             void startRecording (const File& file, AVCaptureVideoOrientation orientationToUse)
             {
+                if (isEnabled == false)
+                    return;
+                
                 if (Pimpl::getIOSVersion().major >= 10)
                     printVideoOutputDebugInfo (movieFileOutput);
 
@@ -1102,9 +1268,11 @@ private:
                 }
             };
 
+            CaptureSession& session;
             AVCaptureMovieFileOutput* movieFileOutput;
             std::unique_ptr<NSObject<AVCaptureFileOutputRecordingDelegate>, NSObjectDeleter> delegate;
             bool recordingInProgress = false;
+            bool isEnabled = false;
             Atomic<int64> firstRecordedFrameTimeMs { 0 };
         };
 
@@ -1127,6 +1295,13 @@ private:
                             });
         }
 
+        void removeOutput (AVCaptureOutput* output)
+        {
+            [captureSession.get() beginConfiguration];
+            [captureSession.get() removeOutput: output];
+            [captureSession.get() commitConfiguration];
+        }
+
         //==============================================================================
         void cameraSessionStarted()
         {
@@ -1138,6 +1313,13 @@ private:
         void cameraSessionRuntimeError (const String& error)
         {
             owner.cameraSessionRuntimeError (error);
+        }
+        
+        void deviceOrientationDidChange()
+        {
+            if (videoDataOutputDelegate) {
+                videoDataOutputDelegate->deviceOrientationDidChange();
+            }
         }
 
         void callListeners (const Image& image)
@@ -1155,7 +1337,7 @@ private:
         dispatch_queue_t captureSessionQueue;
         std::unique_ptr<AVCaptureSession, NSObjectDeleter> captureSession;
         std::unique_ptr<NSObject, NSObjectDeleter> delegate;
-
+        std::unique_ptr<VideoDataOutputDelegate> videoDataOutputDelegate;
         StillPictureTaker stillPictureTaker;
         VideoRecorder videoRecorder;
 
