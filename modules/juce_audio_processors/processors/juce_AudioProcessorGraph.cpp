@@ -908,7 +908,7 @@ void AudioProcessorGraph::topologyChanged()
     sendChangeMessage();
 
     if (isPrepared)
-        updateOnMessageThread (*this);
+        triggerAsyncUpdate();
 }
 
 void AudioProcessorGraph::clear()
