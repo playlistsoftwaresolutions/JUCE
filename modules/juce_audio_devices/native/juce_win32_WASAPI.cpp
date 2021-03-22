@@ -1687,6 +1687,24 @@ public:
                               : outputDeviceNames;
     }
 
+    StringPairArray getDeviceIDs(bool wantInputNames) const override
+    {
+        StringPairArray result;
+
+        if (wantInputNames) {
+            for (int i = 0; i < inputDeviceIds; ++i) {
+                result.set(inputDeviceIds[i], inputDeviceNames[i]);
+            }
+        }
+        else {
+            for (int i = 0; i < outputDeviceIds; ++i) {
+                result.set(outputDeviceIds[i], outputDeviceNames[i]);
+            }
+        }
+
+        return result;
+    }
+
     int getDefaultDeviceIndex (bool /*forInput*/) const override
     {
         jassert (hasScanned); // need to call scanForDevices() before doing this
