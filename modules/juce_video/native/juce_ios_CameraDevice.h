@@ -1175,11 +1175,10 @@ private:
             
             void startRecording (const File& file, AVCaptureVideoOrientation orientationToUse)
             {
-                if (isEnabled == false)
-                    return;
-                
-                if (Pimpl::getIOSVersion().major >= 10)
+               #if JUCE_USE_NEW_CAMERA_API
+                if (@available (iOS 10.0, *))
                     printVideoOutputDebugInfo (movieFileOutput);
+               #endif
 
                 auto url = [NSURL fileURLWithPath: juceStringToNS (file.getFullPathName())
                                       isDirectory: NO];
