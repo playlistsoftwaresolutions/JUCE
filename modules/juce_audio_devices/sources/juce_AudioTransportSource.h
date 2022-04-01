@@ -102,7 +102,7 @@ public:
     double getLengthInSeconds() const;
 
     /** Returns true if the player has stopped because its input stream ran out of data. */
-    bool hasStreamFinished() const noexcept;
+    virtual bool hasStreamFinished() const noexcept;
 
     //==============================================================================
     /** Starts playing (if a source has been selected).
