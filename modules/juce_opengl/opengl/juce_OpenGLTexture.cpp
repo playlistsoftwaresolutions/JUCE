@@ -81,7 +81,10 @@ void OpenGLTexture::create (const int w, const int h, const void* pixels, GLenum
     width  = getAllowedTextureSize (w);
     height = getAllowedTextureSize (h);
 
-    const GLint internalformat = type == GL_ALPHA ? GL_ALPHA : GL_RGBA;
+    GLint internalformat = type == GL_ALPHA ? GL_ALPHA : GL_RGBA;
+
+    if (type == GL_BGR)
+        internalformat = GL_RGB;
 
     if (width != w || height != h)
     {
@@ -144,6 +147,11 @@ void OpenGLTexture::loadImage (const Image& image)
 void OpenGLTexture::loadARGB (const PixelARGB* pixels, const int w, const int h)
 {
     create (w, h, pixels, JUCE_RGBA_FORMAT, false);
+}
+
+void OpenGLTexture::loadRGB(const PixelRGB* pixels, const int w, const int h)
+{
+    create (w, h, pixels, GL_BGR, false);
 }
 
 void OpenGLTexture::loadAlpha (const uint8* pixels, int w, int h)

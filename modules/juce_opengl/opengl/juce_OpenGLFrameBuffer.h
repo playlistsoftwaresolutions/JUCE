@@ -120,6 +120,8 @@ public:
     */
     bool writePixels (const PixelARGB* srcData, const Rectangle<int>& targetArea);
 
+    bool writePixelsRGB(const PixelRGB* srcData, const Rectangle<int>& targetArea);
+
 private:
     class Pimpl;
     std::unique_ptr<Pimpl> pimpl;

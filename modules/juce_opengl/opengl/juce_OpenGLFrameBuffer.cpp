@@ -190,10 +190,12 @@ bool OpenGLFrameBuffer::initialise (OpenGLContext& context, int width, int heigh
 
 bool OpenGLFrameBuffer::initialise (OpenGLContext& context, const Image& image)
 {
-    if (! image.isARGB())
-        return initialise (context, image.convertedToFormat (Image::ARGB));
+    Image::BitmapData bitmap(image, Image::BitmapData::readOnly);
 
-    Image::BitmapData bitmap (image, Image::BitmapData::readOnly);
+    if (image.isARGB() == false) {
+        return initialise (context, bitmap.width, bitmap.height)
+            && writePixelsRGB ((const PixelRGB*) bitmap.data, image.getBounds());
+    }
 
     return initialise (context, bitmap.width, bitmap.height)
             && writePixels ((const PixelARGB*) bitmap.data, image.getBounds());
@@ -341,6 +343,29 @@ bool OpenGLFrameBuffer::writePixels (const PixelARGB* data, const Rectangle<int>
 
     OpenGLTexture tex;
     tex.loadARGB (data, area.getWidth(), area.getHeight());
+
+    glViewport (0, 0, pimpl->width, pimpl->height);
+    pimpl->context.copyTexture (area, Rectangle<int> (area.getX(), area.getY(),
+                                                      tex.getWidth(), tex.getHeight()),
+                                pimpl->width, pimpl->height, true);
+
+    JUCE_CHECK_OPENGL_ERROR
+    return true;
+}
+
+bool OpenGLFrameBuffer::writePixelsRGB(const PixelRGB* data, const Rectangle<int>& area)
+{
+    OpenGLTargetSaver ts (pimpl->context);
+
+    if (! makeCurrentRenderingTarget())
+        return false;
+
+    glDisable (GL_DEPTH_TEST);
+    glDisable (GL_BLEND);
+    JUCE_CHECK_OPENGL_ERROR
+
+    OpenGLTexture tex;
+    tex.loadRGB (data, area.getWidth(), area.getHeight());
 
     glViewport (0, 0, pimpl->width, pimpl->height);
     pimpl->context.copyTexture (area, Rectangle<int> (area.getX(), area.getY(),
