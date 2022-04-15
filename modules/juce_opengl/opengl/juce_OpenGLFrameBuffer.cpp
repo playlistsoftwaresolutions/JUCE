@@ -365,7 +365,7 @@ bool OpenGLFrameBuffer::writePixelsRGB(const PixelRGB* data, const Rectangle<int
     JUCE_CHECK_OPENGL_ERROR
 
     OpenGLTexture tex;
-    tex.loadRGB (data, area.getWidth(), area.getHeight());
+    tex.loadPixels (data, GL_BGR, area.getWidth(), area.getHeight());
 
     glViewport (0, 0, pimpl->width, pimpl->height);
     pimpl->context.copyTexture (area, Rectangle<int> (area.getX(), area.getY(),
