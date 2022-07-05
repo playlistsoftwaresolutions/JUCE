@@ -2,15 +2,15 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2020 - Raw Material Software Limited
+   Copyright (c) 2022 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
-   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
+   By using JUCE, you agree to the terms of both the JUCE 7 End-User License
+   Agreement and JUCE Privacy Policy.
 
-   End User License Agreement: www.juce.com/juce-6-licence
+   End User License Agreement: www.juce.com/juce-7-licence
    Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
@@ -40,7 +40,8 @@ static int getItemDepth (const TreeViewItem* item)
 }
 
 //==============================================================================
-class TreeView::ItemComponent  : public Component
+class TreeView::ItemComponent  : public Component,
+                                 public TooltipClient
 {
 public:
     explicit ItemComponent (TreeViewItem& itemToRepresent)
@@ -76,6 +77,11 @@ public:
     TreeViewItem& getRepresentedItem() const noexcept
     {
         return item;
+    }
+
+    String getTooltip() override
+    {
+        return item.getTooltip();
     }
 
 private:
@@ -216,8 +222,8 @@ private:
             auto topLeft = itemComp.getRepresentedItem().getItemPosition (false).toFloat().getTopLeft();
 
             return { Desktop::getInstance().getMainMouseSource(), topLeft, mods,
-                     MouseInputSource::invalidPressure, MouseInputSource::invalidOrientation, MouseInputSource::invalidRotation,
-                     MouseInputSource::invalidTiltX, MouseInputSource::invalidTiltY,
+                     MouseInputSource::defaultPressure, MouseInputSource::defaultOrientation, MouseInputSource::defaultRotation,
+                     MouseInputSource::defaultTiltX, MouseInputSource::defaultTiltY,
                      &itemComp, &itemComp, Time::getCurrentTime(), topLeft, Time::getCurrentTime(), 0, false };
         }
 
@@ -227,7 +233,7 @@ private:
     std::unique_ptr<AccessibilityHandler> createAccessibilityHandler() override
     {
         if (hasCustomComponent() && customComponent->getAccessibilityHandler() != nullptr)
-            return nullptr;
+            return createIgnoredAccessibilityHandler (*this);
 
         return std::make_unique<ItemAccessibilityHandler> (*this);
     }
@@ -338,7 +344,7 @@ public:
                 auto newComp = std::make_unique<ItemComponent> (*treeItem);
 
                 addAndMakeVisible (*newComp);
-                newComp->addMouseListener (this, false);
+                newComp->addMouseListener (this, treeItem->customComponentUsesTreeViewMouseHandler());
                 componentsToKeep.insert (newComp.get());
 
                 itemComponents.push_back (std::move (newComp));

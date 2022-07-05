@@ -2,15 +2,15 @@
   ==============================================================================
 
    This file is part of the JUCE library.
-   Copyright (c) 2020 - Raw Material Software Limited
+   Copyright (c) 2022 - Raw Material Software Limited
 
    JUCE is an open source library subject to commercial or open-source
    licensing.
 
-   By using JUCE, you agree to the terms of both the JUCE 6 End-User License
-   Agreement and JUCE Privacy Policy (both effective as of the 16th June 2020).
+   By using JUCE, you agree to the terms of both the JUCE 7 End-User License
+   Agreement and JUCE Privacy Policy.
 
-   End User License Agreement: www.juce.com/juce-6-licence
+   End User License Agreement: www.juce.com/juce-7-licence
    Privacy Policy: www.juce.com/juce-privacy-policy
 
    Or: You may also use this code under the terms of the GPL v3 (see
@@ -23,6 +23,8 @@
   ==============================================================================
 */
 
+#include "juce_mac_CGMetalLayerRenderer.h"
+
 @interface NSEvent (DeviceDelta)
 - (float)deviceDeltaX;
 - (float)deviceDeltaY;
@@ -31,16 +33,36 @@
 //==============================================================================
 namespace juce
 {
-    typedef void (*AppFocusChangeCallback)();
-    extern AppFocusChangeCallback appFocusChangeCallback;
-    typedef bool (*CheckEventBlockedByModalComps) (NSEvent*);
-    extern CheckEventBlockedByModalComps isEventBlockedByModalComps;
-}
 
-namespace juce
-{
+using AppFocusChangeCallback = void (*)();
+extern AppFocusChangeCallback appFocusChangeCallback;
+using CheckEventBlockedByModalComps = bool (*) (NSEvent*);
+extern CheckEventBlockedByModalComps isEventBlockedByModalComps;
 
 //==============================================================================
+static void resetTrackingArea (NSView* view)
+{
+    const auto trackingAreas = [view trackingAreas];
+
+    jassert ([trackingAreas count] <= 1);
+
+    for (NSTrackingArea* area in trackingAreas)
+        [view removeTrackingArea: area];
+
+    const auto options = NSTrackingMouseEnteredAndExited
+                         | NSTrackingMouseMoved
+                         | NSTrackingEnabledDuringMouseDrag
+                         | NSTrackingActiveAlways
+                         | NSTrackingInVisibleRect;
+
+    const NSUniquePtr<NSTrackingArea> trackingArea { [[NSTrackingArea alloc] initWithRect: [view bounds]
+                                                                                  options: options
+                                                                                    owner: view
+                                                                                 userInfo: nil] };
+
+    [view addTrackingArea: trackingArea.get()];
+}
+
 static constexpr int translateVirtualToAsciiKeyCode (int keyCode) noexcept
 {
     switch (keyCode)
@@ -101,8 +123,7 @@ static constexpr int translateVirtualToAsciiKeyCode (int keyCode) noexcept
 constexpr int extendedKeyModifier = 0x30000;
 
 //==============================================================================
-class NSViewComponentPeer  : public ComponentPeer,
-                             private Timer
+class NSViewComponentPeer  : public ComponentPeer
 {
 public:
     NSViewComponentPeer (Component& comp, const int windowStyleFlags, NSView* viewToAttachTo)
@@ -121,15 +142,7 @@ public:
 
         [view registerForDraggedTypes: getSupportedDragTypes()];
 
-        const auto options = NSTrackingMouseEnteredAndExited
-                           | NSTrackingMouseMoved
-                           | NSTrackingEnabledDuringMouseDrag
-                           | NSTrackingActiveAlways
-                           | NSTrackingInVisibleRect;
-        [view addTrackingArea: [[NSTrackingArea alloc] initWithRect: r
-                                                            options: options
-                                                              owner: view
-                                                           userInfo: nil]];
+        resetTrackingArea (view);
 
         notificationCenter = [NSNotificationCenter defaultCenter];
 
@@ -140,8 +153,12 @@ public:
 
         [view setPostsFrameChangedNotifications: YES];
 
-       #if USE_COREGRAPHICS_RENDERING && JUCE_COREGRAPHICS_DRAW_ASYNC
-        if (! getComponentAsyncLayerBackedViewDisabled (component))
+      #if USE_COREGRAPHICS_RENDERING
+       #if JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS
+        if (@available (macOS 10.14, *))
+            metalRenderer = std::make_unique<CoreGraphicsMetalLayerRenderer<NSView>> (view, getComponent());
+       #endif
+        if ((windowStyleFlags & ComponentPeer::windowRequiresSynchronousCoreGraphicsRendering) == 0)
         {
             if (@available (macOS 10.8, *))
             {
@@ -149,7 +166,9 @@ public:
                 [[view layer] setDrawsAsynchronously: YES];
             }
         }
-       #endif
+      #endif
+
+        createCVDisplayLink();
 
         if (isSharedWindow)
         {
@@ -245,6 +264,9 @@ public:
 
     ~NSViewComponentPeer() override
     {
+        CVDisplayLinkStop (displayLink);
+        dispatch_source_cancel (displaySource);
+
         [notificationCenter removeObserver: view];
         setOwner (view, nullptr);
 
@@ -344,7 +366,10 @@ public:
         }
 
         if (oldViewSize.width != r.size.width || oldViewSize.height != r.size.height)
+        {
+            numFramesToSkipMetalRenderer = 5;
             [view setNeedsDisplay: true];
+        }
     }
 
     Rectangle<int> getBounds (const bool global) const
@@ -429,20 +454,14 @@ public:
         if (isSharedWindow)
             return;
 
-        setCollectionBehaviour (shouldBeFullScreen);
+        if (shouldBeFullScreen)
+            setCollectionBehaviour (true);
 
         if (isMinimised())
             setMinimised (false);
 
-        if (hasNativeTitleBar())
-        {
-            if (shouldBeFullScreen != isFullScreen())
-                [window toggleFullScreen: nil];
-        }
-        else
-        {
-            [window zoom: nil];
-        }
+        if (shouldBeFullScreen != isFullScreen())
+            [window toggleFullScreen: nil];
     }
 
     bool isFullScreen() const override
@@ -493,12 +512,12 @@ public:
                                     : (v == view);
     }
 
-    BorderSize<int> getFrameSize() const override
+    OptionalBorderSize getFrameSizeIfPresent() const override
     {
-        BorderSize<int> b;
-
         if (! isSharedWindow)
         {
+            BorderSize<int> b;
+
             NSRect v = [view convertRect: [view frame] toView: nil];
             NSRect w = [window frame];
 
@@ -506,9 +525,19 @@ public:
             b.setBottom ((int) v.origin.y);
             b.setLeft ((int) v.origin.x);
             b.setRight ((int) (w.size.width - (v.origin.x + v.size.width)));
+
+            return OptionalBorderSize { b };
         }
 
-        return b;
+        return {};
+    }
+
+    BorderSize<int> getFrameSize() const override
+    {
+        if (const auto frameSize = getFrameSizeIfPresent())
+            return *frameSize;
+
+        return {};
     }
 
     bool hasNativeTitleBar() const
@@ -684,7 +713,7 @@ public:
         else
             // moved into another window which overlaps this one, so trigger an exit
             handleMouseEvent (MouseInputSource::InputSourceType::mouse, MouseInputSource::offscreenMousePos, ModifierKeys::currentModifiers,
-                              getMousePressure (ev), MouseInputSource::invalidOrientation, getMouseTime (ev));
+                              getMousePressure (ev), MouseInputSource::defaultOrientation, getMouseTime (ev));
 
         showArrowCursorIfNeeded();
     }
@@ -778,11 +807,13 @@ public:
                                           name: NSWindowWillMiniaturizeNotification
                                         object: currentWindow];
 
-           #if JUCE_COREGRAPHICS_DRAW_ASYNC
             [notificationCenter removeObserver: view
                                           name: NSWindowDidBecomeKeyNotification
                                         object: currentWindow];
-           #endif
+
+            [notificationCenter removeObserver: view
+                                          name: NSWindowDidChangeScreenNotification
+                                        object: currentWindow];
         }
 
         if (isSharedWindow && [view window] == window && newWindow == nullptr)
@@ -796,7 +827,7 @@ public:
     {
         updateModifiers (ev);
         handleMouseEvent (MouseInputSource::InputSourceType::mouse, getMousePos (ev, view), ModifierKeys::currentModifiers,
-                          getMousePressure (ev), MouseInputSource::invalidOrientation, getMouseTime (ev));
+                          getMousePressure (ev), MouseInputSource::defaultOrientation, getMouseTime (ev));
     }
 
     bool handleKeyEvent (NSEvent* ev, bool isKeyDown)
@@ -914,6 +945,11 @@ public:
             JUCE_END_IGNORE_WARNINGS_GCC_LIKE
         }();
 
+        drawRectWithContext (cg, r);
+    }
+
+    void drawRectWithContext (CGContextRef cg, NSRect r)
+    {
         if (! component.isOpaque())
             CGContextClearRect (cg, CGContextGetClipBoundingBox (cg));
 
@@ -932,10 +968,12 @@ public:
         };
 
        #if USE_COREGRAPHICS_RENDERING && JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS
-        // This option invokes a separate paint call for each rectangle of the clip region.
-        // It's a long story, but this is a basically a workaround for a CGContext not having
-        // a way of finding whether a rectangle falls within its clip region
-        if (usingCoreGraphics)
+        // This was a workaround for a CGContext not having a way of finding whether a rectangle
+        // falls within its clip region. However Apple removed the capability of
+        // [view getRectsBeingDrawn: ...] sometime around 10.13, so on later versions of macOS
+        // numRects will always be 1 and you'll need to use a CoreGraphicsMetalLayerRenderer
+        // to avoid CoreGraphics consolidating disparate rects.
+        if (usingCoreGraphics && metalRenderer == nullptr)
         {
             const NSRect* rects = nullptr;
             NSInteger numRects = 0;
@@ -948,7 +986,7 @@ public:
                     NSRect rect = rects[i];
                     CGContextSaveGState (cg);
                     CGContextClipToRect (cg, CGRectMake (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height));
-                    drawRectWithContext (cg, rect, displayScale);
+                    renderRect (cg, rect, displayScale);
                     CGContextRestoreGState (cg);
                 }
 
@@ -958,11 +996,11 @@ public:
         }
        #endif
 
-        drawRectWithContext (cg, r, displayScale);
+        renderRect (cg, r, displayScale);
         invalidateTransparentWindowShadow();
     }
 
-    void drawRectWithContext (CGContextRef cg, NSRect r, float displayScale)
+    void renderRect (CGContextRef cg, NSRect r, float displayScale)
     {
        #if USE_COREGRAPHICS_RENDERING
         if (usingCoreGraphics)
@@ -1020,48 +1058,78 @@ public:
         // a few when there's a lot of activity.
         // As a work around for this, we use a RectangleList to do our own coalescing of regions before
         // asynchronously asking the OS to repaint them.
-        deferredRepaints.add ((float) area.getX(), (float) area.getY(),
-                              (float) area.getWidth(), (float) area.getHeight());
+        deferredRepaints.add (area.toFloat());
+    }
 
-        if (isTimerRunning())
+    static bool shouldThrottleRepaint()
+    {
+        return areAnyWindowsInLiveResize();
+    }
+
+    void setNeedsDisplayRectangles()
+    {
+        if (deferredRepaints.isEmpty())
             return;
 
         auto now = Time::getMillisecondCounter();
         auto msSinceLastRepaint = (lastRepaintTime >= now) ? now - lastRepaintTime
                                                            : (std::numeric_limits<uint32>::max() - lastRepaintTime) + now;
 
-        static uint32 minimumRepaintInterval = 1000 / 30; // 30fps
+        constexpr uint32 minimumRepaintInterval = 1000 / 30; // 30fps
 
         // When windows are being resized, artificially throttling high-frequency repaints helps
         // to stop the event queue getting clogged, and keeps everything working smoothly.
         // For some reason Logic also needs this throttling to record parameter events correctly.
         if (msSinceLastRepaint < minimumRepaintInterval && shouldThrottleRepaint())
-        {
-            startTimer (static_cast<int> (minimumRepaintInterval - msSinceLastRepaint));
             return;
+
+        if (metalRenderer != nullptr)
+        {
+            const auto compBounds = getComponent().getLocalBounds().toFloat();
+
+            // If we are resizing we need to fall back to synchronous drawing to avoid artefacts
+            if ([window inLiveResize] || numFramesToSkipMetalRenderer > 0)
+            {
+                if (metalRenderer->isAttachedToView (view))
+                {
+                    metalRenderer->detach();
+                    deferredRepaints = compBounds;
+                }
+
+                if (numFramesToSkipMetalRenderer > 0)
+                    --numFramesToSkipMetalRenderer;
+            }
+            else
+            {
+                if (! metalRenderer->isAttachedToView (view))
+                {
+                    metalRenderer->attach (view, getComponent());
+                    deferredRepaints = compBounds;
+                }
+            }
         }
 
-        setNeedsDisplayRectangles();
-    }
+        auto dispatchRectangles = [this]
+        {
+           if (metalRenderer != nullptr && metalRenderer->isAttachedToView (view))
+               return metalRenderer->drawRectangleList (view,
+                                                        (float) [[view window] backingScaleFactor],
+                                                        view.frame,
+                                                        getComponent(),
+                                                        [this] (CGContextRef ctx, CGRect r) { drawRectWithContext (ctx, r); },
+                                                        deferredRepaints);
 
-    static bool shouldThrottleRepaint()
-    {
-        return areAnyWindowsInLiveResize() || ! JUCEApplication::isStandaloneApp();
-    }
+            for (auto& i : deferredRepaints)
+                [view setNeedsDisplayInRect: makeNSRect (i)];
 
-    void timerCallback() override
-    {
-        setNeedsDisplayRectangles();
-        stopTimer();
-    }
+            return true;
+        };
 
-    void setNeedsDisplayRectangles()
-    {
-        for (auto& i : deferredRepaints)
-            [view setNeedsDisplayInRect: makeNSRect (i)];
-
-        lastRepaintTime = Time::getMillisecondCounter();
-        deferredRepaints.clear();
+        if (dispatchRectangles())
+        {
+            lastRepaintTime = Time::getMillisecondCounter();
+            deferredRepaints.clear();
+        }
     }
 
     void performAnyPendingRepaintsNow() override
@@ -1094,13 +1162,34 @@ public:
         return false;
     }
 
-    void sendModalInputAttemptIfBlocked()
+    enum class KeyWindowChanged { no, yes };
+
+    void sendModalInputAttemptIfBlocked (KeyWindowChanged keyChanged)
     {
-        if (isBlockedByModalComponent())
-            if (auto* modal = Component::getCurrentlyModalComponent())
-                if (auto* otherPeer = modal->getPeer())
-                    if ((otherPeer->getStyleFlags() & ComponentPeer::windowIsTemporary) != 0)
-                        modal->inputAttemptWhenModal();
+        if (! isBlockedByModalComponent())
+            return;
+
+        if (auto* modal = Component::getCurrentlyModalComponent())
+        {
+            if (auto* otherPeer = modal->getPeer())
+            {
+                const auto modalPeerIsTemporary = (otherPeer->getStyleFlags() & ComponentPeer::windowIsTemporary) != 0;
+
+                if (! modalPeerIsTemporary)
+                    return;
+
+                // When a peer resigns key status, it might be because we just created a modal
+                // component that is now key.
+                // In this case, we should only dismiss the modal component if it isn't key,
+                // implying that a third window has become key.
+                const auto modalPeerIsKey = [NSApp keyWindow] == static_cast<NSViewComponentPeer*> (otherPeer)->window;
+
+                if (keyChanged == KeyWindowChanged::yes && modalPeerIsKey)
+                    return;
+
+                modal->inputAttemptWhenModal();
+            }
+        }
     }
 
     bool canBecomeKeyWindow()
@@ -1144,6 +1233,12 @@ public:
     void redirectMovedOrResized()
     {
         handleMovedOrResized();
+        setNeedsDisplayRectangles();
+    }
+
+    void windowDidChangeScreen()
+    {
+        updateCVDisplayLinkScreen();
     }
 
     void viewMovedToWindow()
@@ -1163,7 +1258,7 @@ public:
         {
             [notificationCenter addObserver: view
                                    selector: dismissModalsSelector
-                                       name: NSWindowDidMoveNotification
+                                       name: NSWindowWillMoveNotification
                                      object: currentWindow];
 
             [notificationCenter addObserver: view
@@ -1180,13 +1275,20 @@ public:
                                    selector: resignKeySelector
                                        name: NSWindowDidResignKeyNotification
                                      object: currentWindow];
+
+            [notificationCenter addObserver: view
+                                   selector: @selector (windowDidChangeScreen:)
+                                       name: NSWindowDidChangeScreenNotification
+                                     object: currentWindow];
+
+            updateCVDisplayLinkScreen();
         }
     }
 
     void dismissModals()
     {
         if (hasNativeTitleBar() || isSharedWindow)
-            sendModalInputAttemptIfBlocked();
+            sendModalInputAttemptIfBlocked (KeyWindowChanged::no);
     }
 
     void becomeKey()
@@ -1197,7 +1299,7 @@ public:
     void resignKey()
     {
         viewFocusLoss();
-        sendModalInputAttemptIfBlocked();
+        sendModalInputAttemptIfBlocked (KeyWindowChanged::yes);
     }
 
     void liveResizingStart()
@@ -1300,35 +1402,7 @@ public:
         // has a Z label). Therefore, we need to query the current keyboard
         // layout to figure out what character the key would have produced
         // if the shift key was not pressed
-        String unmodified;
-
-       #if JUCE_SUPPORT_CARBON
-        if (auto currentKeyboard = CFUniquePtr<TISInputSourceRef> (TISCopyCurrentKeyboardInputSource()))
-        {
-            if (auto layoutData = (CFDataRef) TISGetInputSourceProperty (currentKeyboard,
-                                                                         kTISPropertyUnicodeKeyLayoutData))
-            {
-                if (auto* layoutPtr = (const UCKeyboardLayout*) CFDataGetBytePtr (layoutData))
-                {
-                    UInt32 keysDown = 0;
-                    UniChar buffer[4];
-                    UniCharCount actual;
-
-                    if (UCKeyTranslate (layoutPtr, [ev keyCode], kUCKeyActionDown, 0, LMGetKbdType(),
-                                        kUCKeyTranslateNoDeadKeysBit, &keysDown, sizeof (buffer) / sizeof (UniChar),
-                                        &actual, buffer) == 0)
-                        unmodified = String (CharPointer_UTF16 (reinterpret_cast<CharPointer_UTF16::CharType*> (buffer)), 4);
-                }
-            }
-        }
-
-        // did the above layout conversion fail
-        if (unmodified.isEmpty())
-       #endif
-        {
-            unmodified = nsStringToJuce ([ev charactersIgnoringModifiers]);
-        }
-
+        String unmodified = nsStringToJuce ([ev charactersIgnoringModifiers]);
         auto keyCode = (int) unmodified[0];
 
         if (keyCode == 0x19) // (backwards-tab)
@@ -1432,7 +1506,7 @@ public:
         return [NSArray arrayWithObjects: type, (NSString*) kPasteboardTypeFileURLPromise, NSPasteboardTypeString, nil];
     }
 
-    BOOL sendDragCallback (const int type, id <NSDraggingInfo> sender)
+    BOOL sendDragCallback (bool (ComponentPeer::* callback) (const DragInfo&), id <NSDraggingInfo> sender)
     {
         NSPasteboard* pasteboard = [sender draggingPasteboard];
         NSString* contentType = [pasteboard availableTypeFromArray: getSupportedDragTypes()];
@@ -1440,9 +1514,10 @@ public:
         if (contentType == nil)
             return false;
 
-        NSPoint p = [view convertPoint: [sender draggingLocation] fromView: nil];
+        const auto p = localToGlobal (convertToPointFloat ([view convertPoint: [sender draggingLocation] fromView: nil]));
+
         ComponentPeer::DragInfo dragInfo;
-        dragInfo.position.setXY ((int) p.x, (int) p.y);
+        dragInfo.position = ScalingHelpers::screenPosToLocalPos (component, p).roundToInt();
 
         if (contentType == NSPasteboardTypeString)
             dragInfo.text = nsStringToJuce ([pasteboard stringForType: NSPasteboardTypeString]);
@@ -1450,15 +1525,7 @@ public:
             dragInfo.files = getDroppedFiles (pasteboard, contentType);
 
         if (! dragInfo.isEmpty())
-        {
-            switch (type)
-            {
-                case 0:   return handleDragMove (dragInfo);
-                case 1:   return handleDragExit (dragInfo);
-                case 2:   return handleDragDrop (dragInfo);
-                default:  jassertfalse; break;
-            }
-        }
+            return (this->*callback) (dragInfo);
 
         return false;
     }
@@ -1539,7 +1606,7 @@ public:
 
     void grabFocus() override
     {
-        if (window != nil && [window canBecomeKeyWindow])
+        if (window != nil)
         {
             [window makeKeyWindow];
             [window makeFirstResponder: view];
@@ -1550,7 +1617,7 @@ public:
 
     void textInputRequired (Point<int>, TextInputTarget&) override {}
 
-    void dismissPendingTextInput() override
+    void closeInputMethodContext() override
     {
         stringBeingComposed.clear();
         const auto* inputContext = [NSTextInputContext currentInputContext];
@@ -1594,6 +1661,7 @@ public:
     String stringBeingComposed;
     NSNotificationCenter* notificationCenter = nil;
 
+    Rectangle<float> lastSizeBeforeZoom;
     RectangleList<float> deferredRepaints;
     uint32 lastRepaintTime;
 
@@ -1769,11 +1837,60 @@ private:
 
     void setFullScreenSizeConstraints (const ComponentBoundsConstrainer& c)
     {
-        const auto minSize = NSMakeSize (static_cast<float> (c.getMinimumWidth()),
-                                         0.0f);
-        [window setMinFullScreenContentSize: minSize];
-        [window setMaxFullScreenContentSize: NSMakeSize (100000, 100000)];
+        if (@available (macOS 10.11, *))
+        {
+            const auto minSize = NSMakeSize (static_cast<float> (c.getMinimumWidth()),
+                                             0.0f);
+            [window setMinFullScreenContentSize: minSize];
+            [window setMaxFullScreenContentSize: NSMakeSize (100000, 100000)];
+        }
     }
+
+    //==============================================================================
+    void onDisplaySourceCallback()
+    {
+        setNeedsDisplayRectangles();
+    }
+
+    void onDisplayLinkCallback()
+    {
+        dispatch_source_merge_data (displaySource, 1);
+    }
+
+    static CVReturn displayLinkCallback (CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*,
+                                         CVOptionFlags, CVOptionFlags*, void* context)
+    {
+        static_cast<NSViewComponentPeer*> (context)->onDisplayLinkCallback();
+        return kCVReturnSuccess;
+    }
+
+    void updateCVDisplayLinkScreen()
+    {
+        auto viewDisplayID = (CGDirectDisplayID) [[window.screen.deviceDescription objectForKey: @"NSScreenNumber"] unsignedIntegerValue];
+        auto result = CVDisplayLinkSetCurrentCGDisplay (displayLink, viewDisplayID);
+        jassertquiet (result == kCVReturnSuccess);
+    }
+
+    void createCVDisplayLink()
+    {
+        displaySource = dispatch_source_create (DISPATCH_SOURCE_TYPE_DATA_ADD, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_event_handler (displaySource, ^(){ onDisplaySourceCallback(); });
+        dispatch_resume (displaySource);
+
+        auto cvReturn = CVDisplayLinkCreateWithActiveCGDisplays (&displayLink);
+        jassertquiet (cvReturn == kCVReturnSuccess);
+
+        cvReturn = CVDisplayLinkSetOutputCallback (displayLink, &displayLinkCallback, this);
+        jassertquiet (cvReturn == kCVReturnSuccess);
+
+        CVDisplayLinkStart (displayLink);
+    }
+
+    CVDisplayLinkRef displayLink = nullptr;
+    dispatch_source_t displaySource = nullptr;
+
+    int numFramesToSkipMetalRenderer = 0;
+    std::unique_ptr<CoreGraphicsMetalLayerRenderer<NSView>> metalRenderer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NSViewComponentPeer)
 };
@@ -1820,6 +1937,7 @@ struct JuceNSViewClass   : public NSViewComponentPeerWrapper<ObjCClass<NSView>>
     {
         addMethod (@selector (isOpaque),                      isOpaque);
         addMethod (@selector (drawRect:),                     drawRect);
+        addMethod (@selector (updateTrackingAreas),           updateTrackingAreas);
         addMethod (@selector (mouseDown:),                    mouseDown);
         addMethod (@selector (mouseUp:),                      mouseUp);
         addMethod (@selector (mouseDragged:),                 mouseDragged);
@@ -1837,6 +1955,7 @@ struct JuceNSViewClass   : public NSViewComponentPeerWrapper<ObjCClass<NSView>>
         addMethod (@selector (acceptsFirstMouse:),            acceptsFirstMouse);
         addMethod (@selector (windowWillMiniaturize:),        windowWillMiniaturize);
         addMethod (@selector (windowDidDeminiaturize:),       windowDidDeminiaturize);
+        addMethod (@selector (windowDidChangeScreen:),        windowDidChangeScreen);
         addMethod (@selector (wantsDefaultClipping),          wantsDefaultClipping);
         addMethod (@selector (worksWhenModal),                worksWhenModal);
         addMethod (@selector (viewDidMoveToWindow),           viewDidMoveToWindow);
@@ -1902,6 +2021,13 @@ struct JuceNSViewClass   : public NSViewComponentPeerWrapper<ObjCClass<NSView>>
     }
 
 private:
+    static void updateTrackingAreas (id self, SEL)
+    {
+        sendSuperclassMessage<void> (self, @selector (updateTrackingAreas));
+
+        resetTrackingArea (static_cast<NSView*> (self));
+    }
+
     static void mouseDown (id self, SEL s, NSEvent* ev)
     {
         if (JUCEApplicationBase::isStandaloneApp())
@@ -2001,6 +2127,12 @@ private:
 
             p->redirectMovedOrResized();
         }
+    }
+
+    static void windowDidChangeScreen (id self, SEL, NSNotification*)
+    {
+        if (auto* p = getOwner (self))
+            p->windowDidChangeScreen();
     }
 
     static BOOL isOpaque (id self, SEL)
@@ -2190,7 +2322,7 @@ private:
     static NSDragOperation draggingUpdated (id self, SEL, id<NSDraggingInfo> sender)
     {
         if (auto* owner = getOwner (self))
-            if (owner->sendDragCallback (0, sender))
+            if (owner->sendDragCallback (&NSViewComponentPeer::handleDragMove, sender))
                 return NSDragOperationGeneric;
 
         return NSDragOperationNone;
@@ -2203,7 +2335,7 @@ private:
 
     static void draggingExited (id self, SEL, id<NSDraggingInfo> sender)
     {
-        callOnOwner (self, &NSViewComponentPeer::sendDragCallback, 1, sender);
+        callOnOwner (self, &NSViewComponentPeer::sendDragCallback, &NSViewComponentPeer::handleDragExit, sender);
     }
 
     static BOOL prepareForDragOperation (id, SEL, id<NSDraggingInfo>)
@@ -2214,7 +2346,7 @@ private:
     static BOOL performDragOperation (id self, SEL, id<NSDraggingInfo> sender)
     {
         auto* owner = getOwner (self);
-        return owner != nullptr && owner->sendDragCallback (2, sender);
+        return owner != nullptr && owner->sendDragCallback (&NSViewComponentPeer::handleDragDrop, sender);
     }
 
     static void concludeDragOperation (id, SEL, id<NSDraggingInfo>) {}
@@ -2303,6 +2435,7 @@ struct JuceNSWindowClass   : public NSViewComponentPeerWrapper<ObjCClass<NSWindo
         addMethod (@selector (windowWillResize:toSize:),            windowWillResize);
         addMethod (@selector (windowDidExitFullScreen:),            windowDidExitFullScreen);
         addMethod (@selector (windowWillEnterFullScreen:),          windowWillEnterFullScreen);
+        addMethod (@selector (windowWillExitFullScreen:),           windowWillExitFullScreen);
         addMethod (@selector (windowWillStartLiveResize:),          windowWillStartLiveResize);
         addMethod (@selector (windowDidEndLiveResize:),             windowDidEndLiveResize);
         addMethod (@selector (window:shouldPopUpDocumentPathMenu:), shouldPopUpPathMenu);
@@ -2320,6 +2453,8 @@ struct JuceNSWindowClass   : public NSViewComponentPeerWrapper<ObjCClass<NSWindo
         addMethod (@selector (keyDown:),                            keyDown);
 
         addMethod (@selector (window:shouldDragDocumentWithEvent:from:withPasteboard:), shouldAllowIconDrag);
+
+        addMethod (@selector (toggleFullScreen:),                                         toggleFullScreen);
 
         addProtocol (@protocol (NSWindowDelegate));
 
@@ -2353,30 +2488,42 @@ private:
        #endif
     }
 
-    static NSRect windowWillUseStandardFrame (id self, SEL, NSWindow*, NSRect r)
+    static NSRect windowWillUseStandardFrame (id self, SEL, NSWindow* window, NSRect r)
     {
         if (auto* owner = getOwner (self))
         {
             if (auto* constrainer = owner->getConstrainer())
             {
-                const auto originalBounds = owner->getFrameSize().addedTo (owner->getComponent().getScreenBounds()).toFloat();
-                const auto expanded = originalBounds.withWidth  ((float) constrainer->getMaximumWidth())
-                                                    .withHeight ((float) constrainer->getMaximumHeight());
-                const auto constrained = expanded.constrainedWithin (convertToRectFloat (flippedScreenRect (r)));
-                return flippedScreenRect (makeNSRect (constrained));
+                if (auto* screen = [window screen])
+                {
+                    const auto safeScreenBounds = convertToRectFloat (flippedScreenRect (owner->hasNativeTitleBar() ? r : [screen visibleFrame]));
+                    const auto originalBounds = owner->getFrameSize().addedTo (owner->getComponent().getScreenBounds()).toFloat();
+                    const auto expanded = originalBounds.withWidth  ((float) constrainer->getMaximumWidth())
+                                                        .withHeight ((float) constrainer->getMaximumHeight());
+                    const auto constrained = expanded.constrainedWithin (safeScreenBounds);
+
+                    return flippedScreenRect (makeNSRect ([&]
+                    {
+                        if (constrained == owner->getBounds().toFloat())
+                            return owner->lastSizeBeforeZoom.toFloat();
+
+                        owner->lastSizeBeforeZoom = owner->getBounds().toFloat();
+                        return constrained;
+                    }()));
+                }
             }
         }
 
         return r;
     }
 
-    static BOOL windowShouldZoomToFrame (id self, SEL, NSWindow* window, NSRect frame)
+    static BOOL windowShouldZoomToFrame (id self, SEL, NSWindow*, NSRect)
     {
         if (auto* owner = getOwner (self))
             if (owner->hasNativeTitleBar() && (owner->getStyleFlags() & ComponentPeer::windowIsResizable) == 0)
                 return NO;
 
-        return convertToRectFloat ([window frame]).withZeroOrigin() != convertToRectFloat (frame).withZeroOrigin();
+        return YES;
     }
 
     static BOOL canBecomeKeyWindow (id self, SEL)
@@ -2459,10 +2606,37 @@ private:
         return frameRect.size;
     }
 
+    static void toggleFullScreen (id self, SEL name, id sender)
+    {
+        if (auto* owner = getOwner (self))
+        {
+            const auto isFullScreen = owner->isFullScreen();
+
+            if (! isFullScreen)
+                owner->lastSizeBeforeZoom = owner->getBounds().toFloat();
+
+            sendSuperclassMessage<void> (self, name, sender);
+
+            if (isFullScreen)
+            {
+                [NSApp setPresentationOptions: NSApplicationPresentationDefault];
+                owner->setBounds (owner->lastSizeBeforeZoom.toNearestInt(), false);
+            }
+        }
+    }
+
     static void windowDidExitFullScreen (id self, SEL, NSNotification*)
     {
         if (auto* owner = getOwner (self))
             owner->resetWindowPresentation();
+    }
+
+    static void windowWillExitFullScreen (id self, SEL, NSNotification*)
+    {
+        // The exit-fullscreen animation looks bad on Monterey if the window isn't resizable...
+        if (auto* owner = getOwner (self))
+            if (auto* window = owner->window)
+                [window setStyleMask: [window styleMask] | NSWindowStyleMaskResizable];
     }
 
     static void windowWillEnterFullScreen (id self, SEL, NSNotification*)
