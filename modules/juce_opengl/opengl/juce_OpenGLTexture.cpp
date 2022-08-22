@@ -146,6 +146,11 @@ void OpenGLTexture::loadARGB (const PixelARGB* pixels, const int w, const int h)
     create (w, h, pixels, JUCE_RGBA_FORMAT, false);
 }
 
+void OpenGLTexture::loadPixels(const void* pixels, GLenum type, const int w, const int h)
+{
+    create(w, h, pixels, type, false);
+}
+
 void OpenGLTexture::loadAlpha (const uint8* pixels, int w, int h)
 {
     create (w, h, pixels, GL_ALPHA, false);
