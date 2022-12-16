@@ -86,7 +86,7 @@ public:
     virtual StringArray getDeviceNames (bool wantInputNames = false) const = 0;
 
     // Ronney 21/10/2020
-    virtual StringPairArray getDeviceIDs(bool wantInputNames = false) const { return {}; }
+    virtual StringPairArray getDeviceIDs(bool /*wantInputNames*/) const { return {}; }
 
     /** Returns the name of the default device.
 
