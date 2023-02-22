@@ -422,6 +422,13 @@ void FileOutputStream::openHandle()
 
     if (h != INVALID_HANDLE_VALUE)
     {
+        if (file.getFullPathName().startsWith("\\\\*\\mailslot"))
+        {
+            fileHandle = (void*)h;
+            currentPosition = 0;
+            return;
+        }
+
         LARGE_INTEGER li;
         li.QuadPart = 0;
         li.LowPart = SetFilePointer (h, 0, &li.HighPart, FILE_END);
