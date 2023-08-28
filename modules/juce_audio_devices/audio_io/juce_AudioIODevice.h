@@ -25,7 +25,11 @@ namespace juce
 
 class AudioIODevice;
 
-/** Additional information that may be passed to the AudioIODeviceCallback. */
+/**
+    Additional information that may be passed to the AudioIODeviceCallback.
+
+    @tags{Audio}
+*/
 struct AudioIODeviceCallbackContext
 {
     /** If the host provides this information, this field will be set to point to
@@ -98,10 +102,7 @@ public:
                                                    float* const* outputChannelData,
                                                    int numOutputChannels,
                                                    int numSamples,
-                                                   const AudioIODeviceCallbackContext& context)
-    {
-        ignoreUnused (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, context);
-    }
+                                                   const AudioIODeviceCallbackContext& context);
 
     /** Called to indicate that the device is about to start calling back.
 
@@ -128,7 +129,6 @@ public:
     */
     virtual void audioDeviceError (const String& errorMessage);
 };
-
 
 //==============================================================================
 /**

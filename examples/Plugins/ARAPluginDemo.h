@@ -117,6 +117,18 @@ private:
     SpinLock processingFlag;
 };
 
+static void crossfade (const float* sourceA,
+                       const float* sourceB,
+                       float aProportionAtStart,
+                       float aProportionAtFinish,
+                       float* destinationBuffer,
+                       int numSamples)
+{
+    AudioBuffer<float> destination { &destinationBuffer, 1, numSamples };
+    destination.copyFromWithRamp (0, 0, sourceA, numSamples, aProportionAtStart, aProportionAtFinish);
+    destination.addFromWithRamp (0, 0, sourceB, numSamples, 1.0f - aProportionAtStart, 1.0f - aProportionAtFinish);
+}
+
 class Looper
 {
 public:
@@ -138,28 +150,60 @@ public:
         }
 
         const auto numChannelsToCopy = std::min (inputBuffer->getNumChannels(), buffer.getNumChannels());
+        const auto actualCrossfadeLengthSamples = std::min (loopRange.getLength() / 2, (int64) desiredCrossfadeLengthSamples);
 
         for (auto samplesCopied = 0; samplesCopied < buffer.getNumSamples();)
         {
-            const auto numSamplesToCopy =
-                std::min (buffer.getNumSamples() - samplesCopied, (int) (loopRange.getEnd() - pos));
+            const auto [needsCrossfade, samplePosOfNextCrossfadeTransition] = [&]() -> std::pair<bool, int64>
+            {
+                if (const auto endOfFadeIn = loopRange.getStart() + actualCrossfadeLengthSamples; pos < endOfFadeIn)
+                    return { true, endOfFadeIn };
+
+                return { false, loopRange.getEnd() - actualCrossfadeLengthSamples };
+            }();
+
+            const auto samplesToNextCrossfadeTransition = samplePosOfNextCrossfadeTransition - pos;
+            const auto numSamplesToCopy = std::min (buffer.getNumSamples() - samplesCopied,
+                                                    (int) samplesToNextCrossfadeTransition);
+
+            const auto getFadeInGainAtPos = [this, actualCrossfadeLengthSamples] (auto p)
+            {
+                return jmap ((float) p, (float) loopRange.getStart(), (float) loopRange.getStart() + (float) actualCrossfadeLengthSamples - 1.0f, 0.0f, 1.0f);
+            };
 
             for (int i = 0; i < numChannelsToCopy; ++i)
             {
-                buffer.copyFrom (i, samplesCopied, *inputBuffer, i, (int) pos, numSamplesToCopy);
+                if (needsCrossfade)
+                {
+                    const auto overlapStart = loopRange.getEnd() - actualCrossfadeLengthSamples
+                                              + (pos - loopRange.getStart());
+
+                    crossfade (inputBuffer->getReadPointer (i, (int) pos),
+                               inputBuffer->getReadPointer (i, (int) overlapStart),
+                               getFadeInGainAtPos (pos),
+                               getFadeInGainAtPos (pos + numSamplesToCopy),
+                               buffer.getWritePointer (i, samplesCopied),
+                               numSamplesToCopy);
+                }
+                else
+                {
+                    buffer.copyFrom (i, samplesCopied, *inputBuffer, i, (int) pos, numSamplesToCopy);
+                }
             }
 
             samplesCopied += numSamplesToCopy;
             pos += numSamplesToCopy;
 
-            jassert (pos <= loopRange.getEnd());
+            jassert (pos <= loopRange.getEnd() - actualCrossfadeLengthSamples);
 
-            if (pos == loopRange.getEnd())
+            if (pos == loopRange.getEnd() - actualCrossfadeLengthSamples)
                 pos = loopRange.getStart();
         }
     }
 
 private:
+    static constexpr int desiredCrossfadeLengthSamples = 50;
+
     const AudioBuffer<float>* inputBuffer;
     Range<int64> loopRange;
     int64 pos;
@@ -252,11 +296,18 @@ private:
     std::unique_ptr<AudioFormatReader> reader;
 };
 
+struct ProcessingLockInterface
+{
+    virtual ~ProcessingLockInterface() = default;
+    virtual ScopedTryReadLock getProcessingLock() = 0;
+};
+
 //==============================================================================
 class PlaybackRenderer  : public ARAPlaybackRenderer
 {
 public:
-    using ARAPlaybackRenderer::ARAPlaybackRenderer;
+    PlaybackRenderer (ARA::PlugIn::DocumentController* dc, ProcessingLockInterface& lockInterfaceIn)
+        : ARAPlaybackRenderer (dc), lockInterface (lockInterfaceIn) {}
 
     void prepareToPlay (double sampleRateIn,
                         int maximumSamplesPerBlockIn,
@@ -307,6 +358,11 @@ public:
                        AudioProcessor::Realtime realtime,
                        const AudioPlayHead::PositionInfo& positionInfo) noexcept override
     {
+        const auto lock = lockInterface.getProcessingLock();
+
+        if (! lock.isLocked())
+            return true;
+
         const auto numSamples = buffer.getNumSamples();
         jassert (numSamples <= maximumSamplesPerBlock);
         jassert (numChannels == buffer.getNumChannels());
@@ -414,8 +470,7 @@ public:
 
 private:
     //==============================================================================
-    // We're subclassing here only to provide a proper default c'tor for our shared resource
-
+    ProcessingLockInterface& lockInterface;
     SharedResourcePointer<SharedTimeSliceThread> sharedTimesliceThread;
     std::map<ARAAudioSource*, PossiblyBufferedReader> audioSourceReaders;
     bool useBufferedAudioSourceReader = true;
@@ -429,8 +484,12 @@ class EditorRenderer  : public ARAEditorRenderer,
                         private ARARegionSequence::Listener
 {
 public:
-    EditorRenderer (ARA::PlugIn::DocumentController* documentController, const PreviewState* previewStateIn)
-        : ARAEditorRenderer (documentController), previewState (previewStateIn), previewBuffer()
+    EditorRenderer (ARA::PlugIn::DocumentController* documentController,
+                    const PreviewState* previewStateIn,
+                    ProcessingLockInterface& lockInterfaceIn)
+        : ARAEditorRenderer (documentController),
+          lockInterface (lockInterfaceIn),
+          previewState (previewStateIn)
     {
         jassert (previewState != nullptr);
     }
@@ -505,13 +564,31 @@ public:
     {
         ignoreUnused (realtime);
 
+        const auto lock = lockInterface.getProcessingLock();
+
+        if (! lock.isLocked())
+            return true;
+
         return asyncConfigCallback.withLock ([&] (bool locked)
         {
             if (! locked)
                 return true;
 
+            const auto fadeOutIfNecessary = [this, &buffer]
+            {
+                if (std::exchange (wasPreviewing, false))
+                {
+                    previewLooper.writeInto (buffer);
+                    const auto fadeOutStart = std::max (0, buffer.getNumSamples() - 50);
+                    buffer.applyGainRamp (fadeOutStart, buffer.getNumSamples() - fadeOutStart, 1.0f, 0.0f);
+                }
+            };
+
             if (positionInfo.getIsPlaying())
+            {
+                fadeOutIfNecessary();
                 return true;
+            }
 
             if (const auto previewedRegion = previewState->previewedRegion.load())
             {
@@ -539,9 +616,9 @@ public:
                     const auto previewDimmed = previewedRegion->getAudioModification<ARADemoPluginAudioModification>()
                                                               ->isDimmed();
 
-                    if (lastPreviewTime != previewTime
-                        || lastPlaybackRegion != previewedRegion
-                        || lastPreviewDimmed != previewDimmed)
+                    if (! exactlyEqual (lastPreviewTime, previewTime)
+                        || ! exactlyEqual (lastPlaybackRegion, previewedRegion)
+                        || ! exactlyEqual (lastPreviewDimmed, previewDimmed))
                     {
                         Range<double> previewRangeInPlaybackTime { previewTime - 0.25, previewTime + 0.25 };
                         previewBuffer->clear();
@@ -565,8 +642,18 @@ public:
                     else
                     {
                         previewLooper.writeInto (buffer);
+
+                        if (! std::exchange (wasPreviewing, true))
+                        {
+                            const auto fadeInLength = std::min (50, buffer.getNumSamples());
+                            buffer.applyGainRamp (0, fadeInLength, 0.0f, 1.0f);
+                        }
                     }
                 }
+            }
+            else
+            {
+                fadeOutIfNecessary();
             }
 
             return true;
@@ -594,11 +681,13 @@ private:
         });
     }
 
+    ProcessingLockInterface& lockInterface;
     const PreviewState* previewState = nullptr;
     AsyncConfigurationCallback asyncConfigCallback { [this] { configure(); } };
     double lastPreviewTime = 0.0;
     ARAPlaybackRegion* lastPlaybackRegion = nullptr;
     bool lastPreviewDimmed = false;
+    bool wasPreviewing = false;
     std::unique_ptr<AudioBuffer<float>> previewBuffer;
     Looper previewLooper;
 
@@ -610,7 +699,8 @@ private:
 };
 
 //==============================================================================
-class ARADemoPluginDocumentControllerSpecialisation  : public ARADocumentControllerSpecialisation
+class ARADemoPluginDocumentControllerSpecialisation  : public ARADocumentControllerSpecialisation,
+                                                       private ProcessingLockInterface
 {
 public:
     using ARADocumentControllerSpecialisation::ARADocumentControllerSpecialisation;
@@ -618,6 +708,16 @@ public:
     PreviewState previewState;
 
 protected:
+    void willBeginEditing (ARADocument*) override
+    {
+        processBlockLock.enterWrite();
+    }
+
+    void didEndEditing (ARADocument*) override
+    {
+        processBlockLock.exitWrite();
+    }
+
     ARAAudioModification* doCreateAudioModification (ARAAudioSource* audioSource,
                                                      ARA::ARAAudioModificationHostRef hostRef,
                                                      const ARAAudioModification* optionalModificationToClone) noexcept override
@@ -629,12 +729,12 @@ protected:
 
     ARAPlaybackRenderer* doCreatePlaybackRenderer() noexcept override
     {
-        return new PlaybackRenderer (getDocumentController());
+        return new PlaybackRenderer (getDocumentController(), *this);
     }
 
     EditorRenderer* doCreateEditorRenderer() noexcept override
     {
-        return new EditorRenderer (getDocumentController(), &previewState);
+        return new EditorRenderer (getDocumentController(), &previewState, *this);
     }
 
     bool doRestoreObjectsFromStream (ARAInputStream& input,
@@ -711,6 +811,14 @@ protected:
 
         return true;
     }
+
+private:
+    ScopedTryReadLock getProcessingLock() override
+    {
+        return ScopedTryReadLock { processBlockLock };
+    }
+
+    ReadWriteLock processBlockLock;
 };
 
 struct PlayHeadState
@@ -994,7 +1102,7 @@ public:
                     const auto quarterPos = barSignaturesConverter.getQuarterForBeat (beat);
                     const int x = timeToViewScaling.getXForTime (tempoConverter.getTimeForQuarter (quarterPos));
                     const auto barSignature = barSignaturesConverter.getBarSignatureForQuarter (quarterPos);
-                    const int lineWidth = (quarterPos == barSignature.position) ? heavyLineWidth : lightLineWidth;
+                    const int lineWidth = (approximatelyEqual (quarterPos, barSignature.position)) ? heavyLineWidth : lightLineWidth;
                     const int beatsSinceBarStart = roundToInt( barSignaturesConverter.getBeatDistanceFromBarStartForQuarter (quarterPos));
                     const int lineHeight = (beatsSinceBarStart == 0) ? rulerHeight : rulerHeight / 2;
                     rects.addWithoutMerging (Rectangle<int> (x - lineWidth / 2, 2 * rulerHeight - lineHeight, lineWidth, lineHeight));
@@ -1624,7 +1732,7 @@ private:
                     const auto end = chordsReader.end();
                     auto it = begin;
 
-                    while (it->position <= quarterPosition && it != end)
+                    while (it != end && it->position <= quarterPosition)
                         ++it;
 
                     if (it != begin)
@@ -1930,9 +2038,10 @@ public:
             selectMusicalContext (musicalContext);
     }
 
-    void willDestroyMusicalContext (ARAMusicalContext*) override
+    void willDestroyMusicalContext (ARAMusicalContext* musicalContext) override
     {
-        selectMusicalContext (nullptr);
+        if (selectedMusicalContext == musicalContext)
+            selectMusicalContext (nullptr);
     }
 
     void didReorderRegionSequencesInDocument (ARADocument*) override
@@ -1979,9 +2088,6 @@ public:
         if (auto* newSelectedMusicalContext = getNewSelectedMusicalContext())
             if (newSelectedMusicalContext != selectedMusicalContext)
                 selectMusicalContext (newSelectedMusicalContext);
-
-        // If no context is used yet and the selection does not yield a new one, the DocumentView
-        // uses the first musical context in the document.
 
         if (const auto timeRange = viewSelection.getTimeRange())
             overlay.setSelectedTimeRange (*timeRange);

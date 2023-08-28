@@ -476,6 +476,9 @@ CodeEditorComponent::CodeEditorComponent (CodeDocument& doc, CodeTokeniser* cons
 
 CodeEditorComponent::~CodeEditorComponent()
 {
+    if (auto* peer = getPeer())
+        peer->refreshTextInputTarget();
+
     document.removeListener (pimpl.get());
 }
 
@@ -503,7 +506,7 @@ bool CodeEditorComponent::isTextInputActive() const
 
 void CodeEditorComponent::setTemporaryUnderlining (const Array<Range<int>>&)
 {
-    jassertfalse; // TODO Windows IME not yet supported for this comp..
+    // TODO IME composition ranges not yet supported for this component
 }
 
 void CodeEditorComponent::setLineNumbersShown (const bool shouldBeShown)
@@ -670,10 +673,9 @@ void CodeEditorComponent::codeDocumentChanged (const int startIndex, const int e
     updateScrollBars();
 }
 
-void CodeEditorComponent::retokenise (int startIndex, int endIndex)
+void CodeEditorComponent::retokenise (int startIndex, [[maybe_unused]] int endIndex)
 {
     const CodeDocument::Position affectedTextStart (document, startIndex);
-    juce::ignoreUnused (endIndex); // Leave room for more efficient impl in future.
 
     clearCachedIterators (affectedTextStart.getLineNumber());
 
@@ -793,7 +795,7 @@ void CodeEditorComponent::scrollToColumnInternal (double column)
 {
     const double newOffset = jlimit (0.0, document.getMaximumLineLength() + 3.0, column);
 
-    if (xOffset != newOffset)
+    if (! approximatelyEqual (xOffset, newOffset))
     {
         xOffset = newOffset;
         updateCaretPosition();
@@ -1592,8 +1594,8 @@ void CodeEditorComponent::mouseDoubleClick (const MouseEvent& e)
 
 void CodeEditorComponent::mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& wheel)
 {
-    if ((verticalScrollBar.isVisible() && wheel.deltaY != 0.0f)
-         || (horizontalScrollBar.isVisible() && wheel.deltaX != 0.0f))
+    if ((verticalScrollBar.isVisible() && ! approximatelyEqual (wheel.deltaY, 0.0f))
+         || (horizontalScrollBar.isVisible() && ! approximatelyEqual (wheel.deltaX, 0.0f)))
     {
         {
             MouseWheelDetails w (wheel);

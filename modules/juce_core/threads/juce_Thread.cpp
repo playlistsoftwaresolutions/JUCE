@@ -81,10 +81,6 @@ void Thread::threadEntryPoint()
     const CurrentThreadHolder::Ptr currentThreadHolder (getCurrentThreadHolder());
     currentThreadHolder->value = this;
 
-   #if JUCE_ANDROID
-    setPriority (priority);
-   #endif
-
     if (threadName.isNotEmpty())
         setCurrentThreadName (threadName);
 
@@ -130,10 +126,10 @@ bool Thread::startThreadInternal (Priority threadPriority)
     shouldExit = false;
 
     // 'priority' is essentially useless on Linux as only realtime
-    // has any options but we need to set this here to satsify
+    // has any options but we need to set this here to satisfy
     // later queries, otherwise we get inconsistent results across
     // platforms.
-   #if JUCE_LINUX || JUCE_BSD
+   #if JUCE_ANDROID || JUCE_LINUX || JUCE_BSD
     priority = threadPriority;
    #endif
 
@@ -170,7 +166,7 @@ bool Thread::startRealtimeThread (const RealtimeOptions& options)
 
     if (threadHandle == nullptr)
     {
-        realtimeOptions = makeOptional (options);
+        realtimeOptions = std::make_optional (options);
 
         if (startThreadInternal (Priority::normal))
             return true;
@@ -280,7 +276,7 @@ void Thread::removeListener (Listener* listener)
 
 bool Thread::isRealtime() const
 {
-    return realtimeOptions.hasValue();
+    return realtimeOptions.has_value();
 }
 
 void Thread::setAffinityMask (const uint32 newAffinityMask)
@@ -289,7 +285,7 @@ void Thread::setAffinityMask (const uint32 newAffinityMask)
 }
 
 //==============================================================================
-bool Thread::wait (const int timeOutMilliseconds) const
+bool Thread::wait (double timeOutMilliseconds) const
 {
     return defaultEvent.wait (timeOutMilliseconds);
 }
@@ -421,7 +417,7 @@ public:
     class AtomicTester
     {
     public:
-        AtomicTester() {}
+        AtomicTester() = default;
 
         static void testInteger (UnitTest& test)
         {
@@ -464,17 +460,17 @@ public:
             /*  These are some simple test cases to check the atomics - let me know
                 if any of these assertions fail on your system!
             */
-            test.expect (a.get() == (Type) 101);
+            test.expect (exactlyEqual (a.get(), (Type) 101));
             test.expect (! a.compareAndSetBool ((Type) 300, (Type) 200));
-            test.expect (a.get() == (Type) 101);
+            test.expect (exactlyEqual (a.get(), (Type) 101));
             test.expect (a.compareAndSetBool ((Type) 200, a.get()));
-            test.expect (a.get() == (Type) 200);
+            test.expect (exactlyEqual (a.get(), (Type) 200));
 
-            test.expect (a.exchange ((Type) 300) == (Type) 200);
-            test.expect (a.get() == (Type) 300);
+            test.expect (exactlyEqual (a.exchange ((Type) 300), (Type) 200));
+            test.expect (exactlyEqual (a.get(), (Type) 300));
 
             b = a;
-            test.expect (b.get() == a.get());
+            test.expect (exactlyEqual (b.get(), a.get()));
         }
     };
 };

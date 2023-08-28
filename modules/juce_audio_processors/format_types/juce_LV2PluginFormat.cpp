@@ -28,7 +28,7 @@
 #include "juce_LV2Common.h"
 #include "juce_LV2Resources.h"
 
-#include <juce_gui_extra/native/juce_mac_NSViewFrameWatcher.h>
+#include <juce_gui_extra/native/juce_NSViewFrameWatcher_mac.h>
 
 #include <thread>
 
@@ -1278,10 +1278,8 @@ private:
                                                   LV2_Options_Option* options,
                                                   LV2_Worker_Schedule* schedule,
                                                   LV2_Resize_Port_Resize* resize,
-                                                  LV2_Log_Log* log)
+                                                  [[maybe_unused]] LV2_Log_Log* log)
     {
-        ignoreUnused (log);
-
         return { LV2_Feature { LV2_STATE__loadDefaultState,         nullptr },
                  LV2_Feature { LV2_BUF_SIZE__boundedBlockLength,    nullptr },
                  LV2_Feature { LV2_URID__map,                       map },
@@ -2581,15 +2579,8 @@ public:
     File bundlePath;
     URL pluginUri;
 
-    auto withBundlePath (File v) const noexcept { return with (&UiInstanceArgs::bundlePath, std::move (v)); }
-    auto withPluginUri  (URL v)  const noexcept { return with (&UiInstanceArgs::pluginUri,  std::move (v)); }
-
-private:
-    template <typename Member>
-    UiInstanceArgs with (Member UiInstanceArgs::* member, Member value) const noexcept
-    {
-        return juce::lv2_host::with (*this, member, std::move (value));
-    }
+    auto withBundlePath (File v) const noexcept { return withMember (*this, &UiInstanceArgs::bundlePath, std::move (v)); }
+    auto withPluginUri  (URL v)  const noexcept { return withMember (*this, &UiInstanceArgs::pluginUri,  std::move (v)); }
 };
 
 static File bundlePathFromUri (const char* uri)
@@ -2616,7 +2607,7 @@ public:
           mLV2_UI__floatProtocol   (map.map (LV2_UI__floatProtocol)),
           mLV2_ATOM__atomTransfer  (map.map (LV2_ATOM__atomTransfer)),
           mLV2_ATOM__eventTransfer (map.map (LV2_ATOM__eventTransfer)),
-          instance (makeInstance (args.pluginUri, args.bundlePath, features)),
+          instance (makeInstance (args, features)),
           idleCallback (getExtensionData<LV2UI_Idle_Interface> (world, LV2_UI__idleInterface))
     {
         jassert (descriptor != nullptr);
@@ -2684,14 +2675,14 @@ private:
     using Instance = std::unique_ptr<void, void (*) (LV2UI_Handle)>;
     using Idle = int (*) (LV2UI_Handle);
 
-    Instance makeInstance (const URL& pluginUri, const File& bundlePath, const LV2_Feature* const* features)
+    Instance makeInstance (const UiInstanceArgs& args, const LV2_Feature* const* features)
     {
         if (descriptor->get() == nullptr)
             return { nullptr, [] (LV2UI_Handle) {} };
 
         return Instance { descriptor->get()->instantiate (descriptor->get(),
-                                                          pluginUri.toString (false).toRawUTF8(),
-                                                          File::addTrailingSeparator (bundlePath.getFullPathName()).toRawUTF8(),
+                                                          args.pluginUri.toString (true).toRawUTF8(),
+                                                          File::addTrailingSeparator (args.bundlePath.getFullPathName()).toRawUTF8(),
                                                           writeFunction,
                                                           this,
                                                           &widget,
@@ -2873,11 +2864,10 @@ private:
 
         ports.forEachPort ([&] (const PortHeader& header)
         {
-            const auto emplaced = result.emplace (header.symbol, header.index);
+            [[maybe_unused]] const auto emplaced = result.emplace (header.symbol, header.index);
 
             // This will complain if there are duplicate port symbols.
             jassert (emplaced.second);
-            ignoreUnused (emplaced);
         });
 
         return result;
@@ -3290,7 +3280,7 @@ private:
             {
                 if (auto* r = ref.getComponent())
                 {
-                    if (std::exchange (r->nativeScaleFactor, platformScale) == platformScale)
+                    if (approximatelyEqual (std::exchange (r->nativeScaleFactor, platformScale), platformScale))
                         return;
 
                     r->nativeScaleFactor = platformScale;
@@ -4884,10 +4874,8 @@ private:
                                                              : freeWheelingPort->info.min;
     }
 
-    void pushMessage (MessageHeader header, uint32_t size, const void* data)
+    void pushMessage (MessageHeader header, [[maybe_unused]] uint32_t size, const void* data)
     {
-        ignoreUnused (size);
-
         if (header.protocol == 0 || header.protocol == instance->urids.mLV2_UI__floatProtocol)
         {
             const auto value = readUnaligned<float> (data);

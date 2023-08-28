@@ -234,7 +234,13 @@ namespace Ids
     DECLARE_ID (androidGradleSettingsContent);
     DECLARE_ID (androidCustomStringXmlElements);
     DECLARE_ID (androidBluetoothNeeded);
+    DECLARE_ID (androidBluetoothScanNeeded);
+    DECLARE_ID (androidBluetoothAdvertiseNeeded);
+    DECLARE_ID (androidBluetoothConnectNeeded);
     DECLARE_ID (androidExternalReadNeeded);
+    DECLARE_ID (androidReadMediaAudioPermission);
+    DECLARE_ID (androidReadMediaImagesPermission);
+    DECLARE_ID (androidReadMediaVideoPermission);
     DECLARE_ID (androidExternalWriteNeeded);
     DECLARE_ID (androidInAppBilling);
     DECLARE_ID (androidVibratePermissionNeeded);
@@ -385,6 +391,7 @@ namespace Ids
     DECLARE_ID (lv2Uri);
     DECLARE_ID (lv2UriUi);
     DECLARE_ID (lv2BinaryLocation);
+    DECLARE_ID (vst3ManifestEnabled);
 
     DECLARE_ID (osxSDK);
     DECLARE_ID (osxCompatibility);

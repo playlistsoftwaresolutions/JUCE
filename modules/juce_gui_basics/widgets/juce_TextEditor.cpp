@@ -948,6 +948,9 @@ TextEditor::TextEditor (const String& name, juce_wchar passwordChar)
 
 TextEditor::~TextEditor()
 {
+    if (auto* peer = getPeer())
+        peer->refreshTextInputTarget();
+
     textValue.removeListener (textHolder);
     textValue.referTo (Value());
 
@@ -1117,7 +1120,6 @@ void TextEditor::lookAndFeelChanged()
 {
     caret.reset();
     recreateCaret();
-    repaint();
 }
 
 void TextEditor::parentHierarchyChanged()
@@ -1240,7 +1242,7 @@ void TextEditor::setText (const String& newText, bool sendTextChangeMessage)
         textValue = newText;
 
         auto oldCursorPos = caretPosition;
-        bool cursorWasAtEnd = oldCursorPos >= getTotalNumChars();
+        auto cursorWasAtEnd = oldCursorPos >= getTotalNumChars();
 
         clearInternal (nullptr);
         insert (newText, 0, currentFont, findColour (textColourId), nullptr, caretPosition);
@@ -1376,26 +1378,23 @@ void TextEditor::repaintText (Range<int> range)
 }
 
 //==============================================================================
-void TextEditor::moveCaret (int newCaretPos)
+void TextEditor::moveCaret (const int newCaretPos)
 {
-    if (newCaretPos < 0)
-        newCaretPos = 0;
-    else
-        newCaretPos = jmin (newCaretPos, getTotalNumChars());
+    const auto clamped = std::clamp (newCaretPos, 0, getTotalNumChars());
 
-    if (newCaretPos != getCaretPosition())
-    {
-        caretPosition = newCaretPos;
+    if (clamped == getCaretPosition())
+        return;
 
-        if (hasKeyboardFocus (false))
-            textHolder->restartTimer();
+    caretPosition = clamped;
 
-        scrollToMakeSureCursorIsVisible();
-        updateCaretPosition();
+    if (hasKeyboardFocus (false))
+        textHolder->restartTimer();
 
-        if (auto* handler = getAccessibilityHandler())
-            handler->notifyAccessibilityEvent (AccessibilityEvent::textChanged);
-    }
+    scrollToMakeSureCursorIsVisible();
+    updateCaretPosition();
+
+    if (auto* handler = getAccessibilityHandler())
+        handler->notifyAccessibilityEvent (AccessibilityEvent::textChanged);
 }
 
 int TextEditor::getCaretPosition() const
@@ -2072,7 +2071,7 @@ bool TextEditor::moveCaretToTop (bool selecting)
 bool TextEditor::moveCaretToStartOfLine (bool selecting)
 {
     const auto caretPos = (getCaretRectangle() - getTextOffset()).toFloat();
-    return moveCaretWithTransaction (indexAtPosition (0.0f, caretPos.getY()), selecting);
+    return moveCaretWithTransaction (indexAtPosition (0.0f, caretPos.getCentreY()), selecting);
 }
 
 bool TextEditor::moveCaretToEnd (bool selecting)
@@ -2083,7 +2082,7 @@ bool TextEditor::moveCaretToEnd (bool selecting)
 bool TextEditor::moveCaretToEndOfLine (bool selecting)
 {
     const auto caretPos = (getCaretRectangle() - getTextOffset()).toFloat();
-    return moveCaretWithTransaction (indexAtPosition ((float) textHolder->getWidth(), caretPos.getY()), selecting);
+    return moveCaretWithTransaction (indexAtPosition ((float) textHolder->getWidth(), caretPos.getCentreY()), selecting);
 }
 
 bool TextEditor::deleteBackwards (bool moveInWholeWordSteps)
@@ -2304,6 +2303,11 @@ void TextEditor::setTemporaryUnderlining (const Array<Range<int>>& newUnderlined
 {
     underlinedSections = newUnderlinedSections;
     repaint();
+}
+
+TextInputTarget::VirtualKeyboardType TextEditor::getKeyboardType()
+{
+    return passwordCharacter != 0 ? passwordKeyboard : keyboardType;
 }
 
 //==============================================================================
