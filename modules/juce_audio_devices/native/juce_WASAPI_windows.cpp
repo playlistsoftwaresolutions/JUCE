@@ -1729,13 +1729,13 @@ public:
         StringPairArray result;
 
         if (wantInputNames) {
-            for (int i = 0; i < inputDeviceIds; ++i) {
-                result.set(inputDeviceIds[i], inputDeviceNames[i]);
+            for (int i = 0; i < devices.inputDeviceIds; ++i) {
+                result.set(devices.inputDeviceIds[i], devices.inputDeviceNames[i]);
             }
         }
         else {
-            for (int i = 0; i < outputDeviceIds; ++i) {
-                result.set(outputDeviceIds[i], outputDeviceNames[i]);
+            for (int i = 0; i < devices.outputDeviceIds; ++i) {
+                result.set(devices.outputDeviceIds[i], devices.outputDeviceNames[i]);
             }
         }
 
