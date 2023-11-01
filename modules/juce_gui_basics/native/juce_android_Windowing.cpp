@@ -194,6 +194,12 @@ static const uint8 javaComponentPeerView[] =
  extern void juce_firebaseRemoteMessageSendError (void*, void*);
 #endif
 
+#if JUCE_IN_APP_PURCHASES && JUCE_MODULE_AVAILABLE_juce_product_unlocking
+ void juce_handleOnResume();
+#else
+ static void juce_handleOnResume() {}
+#endif
+
 //==============================================================================
 #define JNI_CLASS_MEMBERS(METHOD, STATICMETHOD, FIELD, STATICFIELD, CALLBACK) \
  METHOD (create, "<init>", "(II)V")
@@ -1765,7 +1771,8 @@ const int KeyPress::rewindKey       = extendedKeyModifier + 48;
  struct JuceActivityNewIntentListener
  {
      #define JNI_CLASS_MEMBERS(METHOD, STATICMETHOD, FIELD, STATICFIELD, CALLBACK) \
-      CALLBACK (appNewIntent, "appNewIntent", "(Landroid/content/Intent;)V")
+      CALLBACK (appNewIntent, "appNewIntent", "(Landroid/content/Intent;)V") \
+      CALLBACK (appOnResume,  "appOnResume",  "()V")
 
       DECLARE_JNI_CLASS (JavaActivity, JUCE_PUSH_NOTIFICATIONS_ACTIVITY)
      #undef JNI_CLASS_MEMBERS
@@ -1773,6 +1780,11 @@ const int KeyPress::rewindKey       = extendedKeyModifier + 48;
      static void JNICALL appNewIntent (JNIEnv*, jobject /*activity*/, jobject intentData)
      {
          juce_handleNotificationIntent (static_cast<void*> (intentData));
+     }
+
+     static void JNICALL appOnResume(JNIEnv*, jobject)
+     {
+         juce_handleOnResume();
      }
  };
 
