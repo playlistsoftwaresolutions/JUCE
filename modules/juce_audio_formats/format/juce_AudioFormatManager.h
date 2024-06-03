@@ -123,7 +123,7 @@ public:
         If none of the registered formats can open the file, it'll return nullptr.
         It's the caller's responsibility to delete the reader that is returned.
     */
-    AudioFormatReader* createReaderFor (const File& audioFile);
+    virtual AudioFormatReader* createReaderFor (const File& audioFile);
 
     /** Searches through the known formats to try to create a suitable reader for
         this stream.
