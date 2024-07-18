@@ -419,7 +419,8 @@ bool Toolbar::restoreFromString (ToolbarItemFactory& factoryToUse,
 
 void Toolbar::paint (Graphics& g)
 {
-    getLookAndFeel().paintToolbarBackground (g, getWidth(), getHeight(), *this);
+    if (isOpaque())
+        getLookAndFeel().paintToolbarBackground (g, getWidth(), getHeight(), *this);
 }
 
 int Toolbar::getThickness() const noexcept
