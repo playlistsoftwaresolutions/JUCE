@@ -1362,10 +1362,7 @@ struct VST3PluginWindow : public AudioProcessorEditor,
     void componentVisibilityChanged() override
     {
         attachPluginWindow();
-
-        if (! hasDoneInitialResize)
-            resizeToFit();
-
+        resizeToFit();
         componentMovedOrResized (true, true);
     }
     using ComponentMovementWatcher::componentVisibilityChanged;
@@ -1386,8 +1383,6 @@ struct VST3PluginWindow : public AudioProcessorEditor,
         ViewRect rect;
         warnOnFailure (view->getSize (&rect));
         resizeWithRect (*this, rect, nativeScaleFactor);
-
-        hasDoneInitialResize = true;
     }
 
     tresult PLUGIN_API resizeView (IPlugView* incomingView, ViewRect* newSize) override
@@ -1396,6 +1391,7 @@ struct VST3PluginWindow : public AudioProcessorEditor,
         {
             resizeWithRect (embeddedComponent, *newSize, nativeScaleFactor);
             setSize (embeddedComponent.getWidth(), embeddedComponent.getHeight());
+            resizeToFit();
 
             return kResultTrue;
         }
@@ -1457,7 +1453,30 @@ private:
     VSTComSmartPtr<IPlugView> view;
 
    #if JUCE_WINDOWS
-    HWNDComponentWithParent embeddedComponent;
+    struct ViewComponent final : public HWNDComponent
+    {
+        ViewComponent()
+        {
+            setOpaque(true);
+            inner.addToDesktop(0);
+
+            if (auto* peer = inner.getPeer())
+                setHWND(peer->getNativeHandle());
+        }
+
+        void paint(Graphics& g) override { g.fillAll(Colours::black); }
+
+    private:
+        struct Inner final : public Component
+        {
+            Inner() { setOpaque(true); }
+            void paint(Graphics& g) override { g.fillAll(Colours::black); }
+        };
+
+        Inner inner;
+    };
+
+    ViewComponent embeddedComponent;
     using HandleFormat = HWND;
    #elif JUCE_MAC
     AutoResizingNSViewComponentWithParent embeddedComponent;
@@ -1471,7 +1490,7 @@ private:
    #endif
 
     HandleFormat pluginHandle = {};
-    bool recursiveResize = false, hasDoneInitialResize = false;
+    bool recursiveResize = false;
 
     ComponentPeer* currentPeer = nullptr;
     Steinberg::IPlugViewContentScaleSupport* scaleInterface = nullptr;
