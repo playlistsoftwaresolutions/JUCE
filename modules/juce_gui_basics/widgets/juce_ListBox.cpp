@@ -99,13 +99,7 @@ public:
         if (! asBase().isEnabled())
             return;
 
-        const auto select = getOwner().getRowSelectedOnMouseDown()
-                            && ! selected
-                            && ! detail::ViewportHelpers::wouldScrollOnEvent (getOwner().getViewport(), e.source) ;
-        if (select)
-            asBase().performSelection (e, false);
-        else
-            selectRowOnMouseUp = true;
+        asBase().performSelection(e, false);
     }
 
     void mouseUp (const MouseEvent& e) override

@@ -74,6 +74,23 @@ struct ZipFile::ZipEntryHolder
         auto minutes   = (int) ((time >> 5) & 63);
         auto seconds   = (int) ((time & 31) << 1);
 
+        if (seconds >= 60) {
+            jassert(seconds < 120);
+            seconds -= 60;
+			minutes += 1;
+        }
+
+        if (minutes == 60) {
+			minutes = 0;
+            hours += 1;
+		}
+
+		if (hours == 24) {
+            hours = 0;
+			day += 1;
+            jassertfalse;
+		}
+
         return { year, month, day, hours, minutes, seconds };
     }
 
