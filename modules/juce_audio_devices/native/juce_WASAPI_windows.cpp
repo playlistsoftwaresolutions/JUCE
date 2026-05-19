@@ -1413,7 +1413,7 @@ public:
         flags.fetch_and (~(flagShutdown | flagInputSampleRateDidChange | flagOutputSampleRateDidChange),
                          std::memory_order_acq_rel);
 
-        startThread (Priority::high);
+        startRealtimeThread(Thread::RealtimeOptions{}.withApproximateAudioProcessingTime(bufferSizeSamples, sampleRate));
         Thread::sleep (5);
 
         if (inputDevice != nullptr && inputDevice->client != nullptr)

@@ -476,7 +476,7 @@ Time Time::fromISO8601 (StringRef iso)
 
     if (year < 0)
     {
-        jassertfalse;
+        //jassertfalse;
         return {};
     }
 
