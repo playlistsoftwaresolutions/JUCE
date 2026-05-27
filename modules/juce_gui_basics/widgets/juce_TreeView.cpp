@@ -895,8 +895,17 @@ struct TreeView::InsertPoint
     int insertIndex = 0;
 };
 
+void TreeView::InsertPointHighlightComponent::setTargetPosition(const TreeView::InsertPoint& insertPos, const int width) noexcept
+{
+    lastItem = insertPos.item;
+    lastIndex = insertPos.insertIndex;
+    auto offset = getHeight() / 2;
+    setBounds(insertPos.pos.x - offset, insertPos.pos.y - offset,
+        width - (insertPos.pos.x - offset), getHeight());
+}
+
 //==============================================================================
-class TreeView::InsertPointHighlight final : public Component
+class InsertPointHighlight final : public TreeView::InsertPointHighlightComponent
 {
 public:
     InsertPointHighlight()
@@ -904,15 +913,6 @@ public:
         setSize (100, 12);
         setAlwaysOnTop (true);
         setInterceptsMouseClicks (false, false);
-    }
-
-    void setTargetPosition (const InsertPoint& insertPos, const int width) noexcept
-    {
-        lastItem = insertPos.item;
-        lastIndex = insertPos.insertIndex;
-        auto offset = getHeight() / 2;
-        setBounds (insertPos.pos.x - offset, insertPos.pos.y - offset,
-                   width - (insertPos.pos.x - offset), getHeight());
     }
 
     void paint (Graphics& g) override
@@ -927,27 +927,24 @@ public:
         g.strokePath (p, PathStrokeType (2.0f));
     }
 
-    TreeViewItem* lastItem = nullptr;
-    int lastIndex = 0;
-
 private:
     JUCE_DECLARE_NON_COPYABLE (InsertPointHighlight)
 };
 
+void TreeView::TargetGroupHighlightComponent::setTargetPosition(TreeViewItem* const item) noexcept
+{
+    setBounds(item->getItemPosition(true)
+        .withHeight(item->getItemHeight()));
+}
+
 //==============================================================================
-class TreeView::TargetGroupHighlight final : public Component
+class TargetGroupHighlight final : public TreeView::TargetGroupHighlightComponent
 {
 public:
     TargetGroupHighlight()
     {
         setAlwaysOnTop (true);
         setInterceptsMouseClicks (false, false);
-    }
-
-    void setTargetPosition (TreeViewItem* const item) noexcept
-    {
-        setBounds (item->getItemPosition (true)
-                     .withHeight (item->getItemHeight()));
     }
 
     void paint (Graphics& g) override
@@ -1367,6 +1364,16 @@ void TreeView::updateVisibleItems (std::optional<Point<int>> viewportPosition)
     viewport->recalculatePositions (TreeViewport::Async::yes, std::move (viewportPosition));
 }
 
+std::unique_ptr<TreeView::InsertPointHighlightComponent> TreeView::getDragInsertPointHighlight()
+{
+    return std::make_unique<InsertPointHighlight>();
+}
+
+std::unique_ptr<TreeView::TargetGroupHighlightComponent> TreeView::getDragTargetGroupHighlight()
+{
+    return std::make_unique<TargetGroupHighlight>();
+}
+
 //==============================================================================
 void TreeView::showDragHighlight (const InsertPoint& insertPos) noexcept
 {
@@ -1374,16 +1381,22 @@ void TreeView::showDragHighlight (const InsertPoint& insertPos) noexcept
 
     if (dragInsertPointHighlight == nullptr)
     {
-        dragInsertPointHighlight = std::make_unique<InsertPointHighlight>();
-        dragTargetGroupHighlight = std::make_unique<TargetGroupHighlight>();
+        dragInsertPointHighlight = getDragInsertPointHighlight();
+        dragTargetGroupHighlight = getDragTargetGroupHighlight();
 
-        addAndMakeVisible (dragInsertPointHighlight.get());
-        addAndMakeVisible (dragTargetGroupHighlight.get());
+		if (dragInsertPointHighlight)
+            addAndMakeVisible (dragInsertPointHighlight.get());
+
+		if (dragTargetGroupHighlight)
+            addAndMakeVisible (dragTargetGroupHighlight.get());
     }
 
-    dragInsertPointHighlight->setTargetPosition (insertPos, viewport->getViewWidth());
-    dragTargetGroupHighlight->setTargetPosition (insertPos.item);
-}
+	if (dragInsertPointHighlight)
+        dragInsertPointHighlight->setTargetPosition (insertPos, viewport->getViewWidth());
+
+	if (dragTargetGroupHighlight)
+        dragTargetGroupHighlight->setTargetPosition (insertPos.item);
+}   
 
 void TreeView::hideDragHighlight() noexcept
 {

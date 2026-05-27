@@ -835,6 +835,38 @@ public:
     /** Returns the component that currently represents a given TreeViewItem. */
     Component* getItemComponent (const TreeViewItem* item) const;
 
+    /** If you're using createItemComponent() to create a custom component for the item, you can
+        use these methods to return components that will be used to highlight the item when
+        it's being dragged over, or when it's the target of a drag-and-drop operation.
+    */
+
+    struct InsertPoint;
+
+    struct InsertPointHighlightComponent : Component
+    {
+    private:
+		friend class TreeView;
+        void setTargetPosition(const InsertPoint& insertPos, const int width) noexcept;
+        TreeViewItem* lastItem = nullptr;
+        int lastIndex = 0;
+    };
+
+    virtual std::unique_ptr<InsertPointHighlightComponent> getDragInsertPointHighlight();
+
+    /** If you're using createItemComponent() to create a custom component for the item, you can
+        use these methods to return components that will be used to highlight the item when
+        it's being dragged over, or when it's the target of a drag-and-drop operation.
+    */
+
+    struct TargetGroupHighlightComponent : Component
+    {
+    private:
+        friend class TreeView;
+        void setTargetPosition(TreeViewItem* const item) noexcept;
+    };
+
+    virtual std::unique_ptr<TargetGroupHighlightComponent> getDragTargetGroupHighlight();
+
     //==============================================================================
     /** Saves the current state of open/closed nodes so it can be restored later.
 
@@ -939,8 +971,6 @@ private:
     class ItemComponent;
     class ContentComponent;
     class TreeViewport;
-    class InsertPointHighlight;
-    class TargetGroupHighlight;
     class TreeAccessibilityHandler;
     struct InsertPoint;
 
@@ -958,8 +988,8 @@ private:
 
     std::unique_ptr<TreeViewport> viewport;
     TreeViewItem* rootItem = nullptr;
-    std::unique_ptr<InsertPointHighlight> dragInsertPointHighlight;
-    std::unique_ptr<TargetGroupHighlight> dragTargetGroupHighlight;
+    std::unique_ptr<InsertPointHighlightComponent> dragInsertPointHighlight;
+    std::unique_ptr<TargetGroupHighlightComponent> dragTargetGroupHighlight;
     int indentSize = -1;
     bool defaultOpenness = false, rootItemVisible = true, multiSelectEnabled = false, openCloseButtonsVisible = true;
 
