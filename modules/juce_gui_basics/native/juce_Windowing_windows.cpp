@@ -571,7 +571,7 @@ RTL_OSVERSIONINFOW getWindowsVersionInfo();
 
 double Desktop::getDefaultMasterScale()
 {
-    if (isPerMonitorDPIAwareProcess())
+    if (setDPIAwareness())
         return 1.0;
 
     return getGlobalDPI() / USER_DEFAULT_SCREEN_DPI;
@@ -5488,6 +5488,7 @@ void HWNDComponentPeer::setCurrentRenderingEngine (int e)
         // can only be created once per window.
         renderContext.reset();
         renderContext = contextDescriptors[e].construct (*this);
+        InvalidateRect (hwnd, nullptr, TRUE);
     }
 }
 
