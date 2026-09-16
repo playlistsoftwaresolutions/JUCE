@@ -323,6 +323,108 @@ extern HWND juce_messageWindowHandle;
 class ASIOAudioIODeviceType;
 static void sendASIODeviceChangeToListeners (ASIOAudioIODeviceType*);
 
+// ASIO Link Pro returns FALSE from its window procedure while a debugger is
+// attached, aborting WM_NCCREATE. Override only that DLL's imported check.
+// AiresCodec and every other loaded module still see the real debugger state.
+static BOOL WINAPI asioLinkIsDebuggerPresent() noexcept
+{
+    return FALSE;
+}
+
+static bool patchAsioLinkDebuggerCheck(HMODULE module)
+{
+    auto* base = reinterpret_cast<uint8*> (module);
+    const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*> (base);
+
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        return false;
+
+    const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*> (base + dosHeader->e_lfanew);
+
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
+    const auto& imports = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+    if (imports.VirtualAddress == 0)
+        return false;
+
+    // Match the loader-resolved function address instead of relying on an
+    // import DLL name that may vary because of Windows export forwarding.
+    const auto original = reinterpret_cast<ULONG_PTR> (
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsDebuggerPresent"));
+    const auto replacement = reinterpret_cast<ULONG_PTR> (&asioLinkIsDebuggerPresent);
+    auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*> (base + imports.VirtualAddress);
+
+    for (; descriptor->Name != 0; ++descriptor)
+    {
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->FirstThunk);
+
+        for (; thunk->u1.Function != 0; ++thunk)
+        {
+            auto* slot = reinterpret_cast<ULONG_PTR*>(&thunk->u1.Function);
+
+            if (*slot != original && *slot != replacement)
+                continue;
+
+            if (*slot == original)
+            {
+                // The IAT is normally read-only. Make only this entry writable
+                // and restore its original page protection immediately after.
+                DWORD oldProtection = 0;
+
+                if (!VirtualProtect(slot, sizeof (*slot), PAGE_READWRITE, &oldProtection))
+                    return false;
+
+                *slot = replacement;
+                DWORD ignored = 0;
+                VirtualProtect(slot, sizeof (*slot), oldProtection, &ignored);
+            }
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static HMODULE prepareAsioLinkForDebugger(const CLSID& classId)
+{
+    if (!IsDebuggerPresent())
+        return nullptr;
+
+    LPOLESTR rawClassId = nullptr;
+
+    if (StringFromCLSID(classId, &rawClassId) != S_OK)
+        return nullptr;
+
+    const String classIdString (rawClassId);
+    CoTaskMemFree(rawClassId);
+
+    // Resolve the COM server for this exact CLSID so no other ASIO driver is
+    // affected by the debugger workaround.
+    const auto driverPath = WindowsRegistry::getValue(
+        "HKEY_CLASSES_ROOT\\CLSID\\" + classIdString + "\\InprocServer32\\");
+
+    if (!File(driverPath).getFileName().equalsIgnoreCase("asiolink.dll"))
+        return nullptr;
+
+    // Hold a temporary module reference so its IAT can be patched before
+    // CoCreateInstance executes the ASIO Link startup code.
+    auto module = LoadLibraryW(driverPath.toWideCharPointer());
+
+    if (module != nullptr && patchAsioLinkDebuggerCheck(module))
+    {
+        DBG("ASIO: patched ASIO Link debugger check");
+        return module;
+    }
+
+    if (module != nullptr)
+        FreeLibrary(module);
+
+    return nullptr;
+}
+
 //==============================================================================
 class ASIOAudioIODevice final : public AudioIODevice,
                                 private Timer
@@ -1151,10 +1253,13 @@ private:
         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wlanguage-extension-token")
         JUCE_BEGIN_IGNORE_WARNINGS_MSVC (6320)
 
+        const auto asioLinkModule = prepareAsioLinkForDebugger (classId);
+        bool created = false;
+
         __try
         {
-            return CoCreateInstance (classId, nullptr, CLSCTX_INPROC_SERVER,
-                                     classId, (void**) &asioObject) == S_OK;
+            created = CoCreateInstance(classId, nullptr, CLSCTX_INPROC_SERVER,
+                                        classId, (void**) &asioObject) == S_OK;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -1164,7 +1269,12 @@ private:
         JUCE_END_IGNORE_WARNINGS_MSVC
         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
-        return false;
+        // Release only the temporary reference acquired for patching; COM now
+        // manages the normal lifetime of the created driver instance.
+        if (asioLinkModule != nullptr)
+            FreeLibrary(asioLinkModule);
+
+        return created;
     }
 
     String getLastDriverError() const
